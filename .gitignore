@@ -1,0 +1,11 @@
+# 本地设计文档，保留在工作区，不进入版本库
+/project.md
+/project-design.md
+
+# 本地环境与编辑器文件
+.DS_Store
+.env
+.env.*
+.idea/
+.vscode/
+*.swp
