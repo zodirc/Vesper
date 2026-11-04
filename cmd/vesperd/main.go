@@ -12,11 +12,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zodirc/Vesper/internal/activedetect"
 	"github.com/zodirc/Vesper/internal/api"
 	"github.com/zodirc/Vesper/internal/control"
 )
 
 func main() {
+	if os.Getenv("VESPER_ISOLATE_PROVE") == "1" {
+		activedetect.ProveNoEgress()
+		return
+	}
 	user := os.Getenv("VESPER_ADMIN_USER")
 	password := os.Getenv("VESPER_ADMIN_PASSWORD")
 	if user == "" || password == "" {
@@ -47,8 +52,12 @@ func main() {
 			}
 		}
 	}()
+	apiServer := &api.Server{Service: service, User: user, Password: password}
+	if err := apiServer.Restore(ctx); err != nil {
+		log.Fatal(err)
+	}
 	server := &http.Server{
-		Addr: listen, Handler: (&api.Server{Service: service, User: user, Password: password}).Handler(),
+		Addr: listen, Handler: apiServer.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
