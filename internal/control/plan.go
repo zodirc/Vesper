@@ -6,19 +6,44 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/zodirc/Vesper/internal/asset"
+	"github.com/zodirc/Vesper/internal/collect"
 	"github.com/zodirc/Vesper/internal/id"
+	"github.com/zodirc/Vesper/internal/rule"
 	"github.com/zodirc/Vesper/internal/scope"
 	"github.com/zodirc/Vesper/internal/task"
 )
 
 type planBody struct {
-	Ports     []int    `json:"ports"`
-	Transport string   `json:"transport"`
-	Hostname  string   `json:"hostname"`
-	Allowed   []string `json:"allowed_addresses,omitempty"`
+	Ports            []int                   `json:"ports"`
+	Transport        string                  `json:"transport"`
+	Hostname         string                  `json:"hostname"`
+	Allowed          []string                `json:"allowed_addresses,omitempty"`
+	FindingID        string                  `json:"finding_id,omitempty"`
+	OccurrenceID     string                  `json:"occurrence_id,omitempty"`
+	ConditionDigest  string                  `json:"condition_digest,omitempty"`
+	VulnerabilityID  string                  `json:"vulnerability_id,omitempty"`
+	Environment      *observationEnvironment `json:"observation_environment,omitempty"`
+	ActiveTemplates  []frozenTemplate        `json:"active_templates,omitempty"`
+	NmapFingerprints []string                `json:"nmap_fingerprints,omitempty"`
+	ConfigRules      []string                `json:"config_rules,omitempty"`
+}
+
+type preparedScan struct {
+	Name            string
+	Target          asset.Target
+	Transport       string
+	Ports           []int
+	GrantID         id.ID
+	Trigger         string
+	FindingID       id.ID
+	OccurrenceID    id.ID
+	Condition       string
+	VulnerabilityID string
+	RuleID          id.ID
 }
 
 type planFailure struct {
@@ -61,42 +86,128 @@ func (s *Service) CreateScan(ctx context.Context, input ScanInput) (task.Run, er
 	if err != nil {
 		return task.Run{}, err
 	}
+	transport, err := scanTransport(input.Transport, target.Transport)
+	if err != nil {
+		return task.Run{}, err
+	}
+	ports := append([]int(nil), input.Ports...)
+	if target.Port != nil {
+		ports = []int{*target.Port}
+	}
+	if len(ports) == 0 {
+		return task.Run{}, fmt.Errorf("create scan: no ports")
+	}
+	return s.startScan(ctx, preparedScan{
+		Name: input.Name, Target: target, Transport: transport, Ports: ports, GrantID: input.GrantID, Trigger: "manual",
+	}, now)
+}
+
+// CreateVerification 从 Finding 和最近一次发生记录创建复核扫描。
+// CreateVerification creates a verification scan from a finding and its latest occurrence.
+//
+// grantID 在创建时重新校验并冻结到新运行，预算账本也是新的。端点类 Finding 只复测该端点的地址、传输协议和端口，不创建主机采集。
+// 配置类 Finding 采集该规则的主操作，以及适用条件点名的采集操作。计划快照写入 finding、occurrence、条件摘要和漏洞标识，因为 ScanRun 没有单独的 Finding 列。
+// grantID is checked again at creation and frozen into the new run. The budget ledger is also new. An endpoint finding retests only that endpoint's address, transport, and port, and does not create host collection.
+// A configuration finding collects the rule's primary operation and the operations named by its applicability conditions. The plan snapshot records the finding, occurrence, condition digest, and vulnerability identifier because ScanRun has no separate finding column.
+//
+// 扫描不可达、无响应、规则不支持或证据不足都不会关闭 Finding。调用方仍要用符合复核条件的检测结果单独写入 resolve。
+// An unreachable target, no response, an unsupported rule, or insufficient evidence does not close the finding. The caller still records resolve separately with a detection that meets the verification rule.
+//
+// Finding 不存在时返回 ErrFindingNotFound。没有发生记录、端点或可复测操作时返回 ErrVerificationUnavailable，并且不创建运行。
+// It returns ErrFindingNotFound when the finding does not exist. It returns ErrVerificationUnavailable and creates no run when the occurrence, endpoint, or retest operation is missing.
+func (s *Service) CreateVerification(ctx context.Context, findingID, grantID id.ID) (task.Run, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	now := s.now().UTC()
+	s.mu.Lock()
+	finding := s.findingByID(findingID)
+	if finding == nil {
+		s.mu.Unlock()
+		return task.Run{}, ErrFindingNotFound
+	}
+	occurrence := latestOccurrence(s.occurrences, finding.ID)
+	if occurrence == nil {
+		s.mu.Unlock()
+		return task.Run{}, ErrVerificationUnavailable
+	}
+	findingCopy := *finding
+	occurrenceCopy := *occurrence
+	endpoint, hasEndpoint := s.catalog.Endpoints[finding.EndpointID]
+	operations := verificationOperations(s.packs, findingCopy.RuleID, findingCopy.VulnerabilityID)
+	s.mu.Unlock()
+	if findingCopy.FindingType == "misconfiguration" || findingCopy.EndpointID.IsZero() {
+		if len(operations) == 0 {
+			return task.Run{}, ErrVerificationUnavailable
+		}
+		return s.startCollectVerification(ctx, findingCopy, occurrenceCopy, operations, grantID, now)
+	}
+	if !hasEndpoint || endpoint.Port < 1 || (endpoint.Transport != "tcp" && endpoint.Transport != "udp") {
+		return task.Run{}, ErrVerificationUnavailable
+	}
+	port := endpoint.Port
+	target, err := asset.ParseTarget("endpoint", endpoint.Address.String(), endpoint.Transport, &port, now)
+	if err != nil {
+		return task.Run{}, err
+	}
+	return s.startScan(ctx, preparedScan{
+		Name: "verification:" + findingCopy.VulnerabilityID, Target: target, Transport: endpoint.Transport, Ports: []int{endpoint.Port},
+		GrantID: grantID, Trigger: "verification", FindingID: findingCopy.ID, OccurrenceID: occurrenceCopy.ID,
+		Condition: occurrenceCopy.ConditionDigest, VulnerabilityID: findingCopy.VulnerabilityID, RuleID: findingCopy.RuleID,
+	}, now)
+}
+
+func (s *Service) startScan(ctx context.Context, prepared preparedScan, now time.Time) (task.Run, error) {
 	runID, err := id.New()
 	if err != nil {
 		return task.Run{}, err
 	}
+	environment := s.currentEnvironment(now)
 	s.mu.Lock()
 	err = s.commitState(ctx, func() error {
-		grant, ok := s.grants[input.GrantID]
+		grant, ok := s.grants[prepared.GrantID]
 		if !ok {
 			return fmt.Errorf("create scan: grant not found")
 		}
 		if grant.Status != scope.StatusActive {
 			return fmt.Errorf("create scan: grant status %s", grant.Status)
 		}
-		ports := append([]int(nil), input.Ports...)
-		if target.Port != nil {
-			ports = []int{*target.Port}
-		}
-		if len(ports) == 0 {
-			return fmt.Errorf("create scan: no ports")
-		}
 		digest, err := grant.Digest()
 		if err != nil {
 			return err
 		}
-		body, err := json.Marshal(planBody{Ports: ports, Transport: "tcp", Hostname: target.Hostname})
+		templates, err := s.selectActiveTemplates(grant, !prepared.FindingID.IsZero(), prepared.RuleID)
 		if err != nil {
 			return err
+		}
+		nmapPacks := s.publishedNmapFingerprints()
+		configPacks := s.publishedConfigPacks()
+		body, err := json.Marshal(planBody{
+			Ports: prepared.Ports, Transport: prepared.Transport, Hostname: prepared.Target.Hostname,
+			FindingID: prepared.FindingID.String(), OccurrenceID: prepared.OccurrenceID.String(),
+			ConditionDigest: prepared.Condition, VulnerabilityID: prepared.VulnerabilityID, Environment: &environment,
+			ActiveTemplates: templates, NmapFingerprints: nmapPacks, ConfigRules: configPacks,
+		})
+		if err != nil {
+			return err
+		}
+		if prepared.FindingID.IsZero() {
+			body, err = json.Marshal(planBody{
+				Ports: prepared.Ports, Transport: prepared.Transport, Hostname: prepared.Target.Hostname,
+				Environment: &environment, ActiveTemplates: templates, NmapFingerprints: nmapPacks, ConfigRules: configPacks,
+			})
+			if err != nil {
+				return err
+			}
 		}
 		budget, err := budgetSnapshot(grant)
 		if err != nil {
 			return err
 		}
-		s.catalog.AddTarget(target)
+		s.catalog.AddTarget(prepared.Target)
 		run := versionedRun(task.Run{
-			ID: runID, Name: input.Name, TargetIDs: []id.ID{target.ID}, ScopeGrantID: grant.ID, ScopeDigest: digest,
-			TriggerType: "manual", EffectiveBudget: budget, IntelSnapshotID: s.latestSnapshotID(),
+			ID: runID, Name: prepared.Name, TargetIDs: []id.ID{prepared.Target.ID}, ScopeGrantID: grant.ID, ScopeDigest: digest,
+			TriggerType: prepared.Trigger, EffectiveBudget: budget, IntelSnapshotID: s.latestSnapshotID(),
 			ObservationPointIDs: []id.ID{s.pointID}, CreatedAt: now, Plan: body,
 		})
 		if err := s.tasks.CreateRun(run); err != nil {
@@ -216,11 +327,15 @@ func (s *Service) planAddresses(ctx context.Context, runID id.ID, target asset.T
 		}
 		addresses = resolution.Addresses
 	}
+	operation, err := planOperation(grant, plan.Transport)
+	if err != nil {
+		return nil, err
+	}
 	var allowed []netip.Addr
 	for _, addr := range addresses {
 		decision := grant.Check(scope.CheckInput{
 			IP: addr, Hostname: target.Hostname, ResolvedFromGrant: target.TargetType == "hostname",
-			Port: plan.Ports[0], Transport: plan.Transport, Operation: scope.OpConnect, ObservationPointID: s.pointID, Now: now,
+			Port: plan.Ports[0], Transport: plan.Transport, Operation: operation, ObservationPointID: s.pointID, Now: now,
 		})
 		if decision.Allowed {
 			allowed = append(allowed, addr.Unmap())
@@ -235,7 +350,7 @@ func (s *Service) planAddresses(ctx context.Context, runID id.ID, target asset.T
 	}
 	for _, port := range plan.Ports {
 		decision := grant.Check(scope.CheckInput{
-			IP: allowed[0], Port: port, Transport: plan.Transport, Operation: scope.OpConnect,
+			IP: allowed[0], Port: port, Transport: plan.Transport, Operation: operation,
 			ObservationPointID: s.pointID, Now: now, Hostname: target.Hostname, ResolvedFromGrant: target.TargetType == "hostname",
 		})
 		if !decision.Allowed {
@@ -324,28 +439,43 @@ func (s *Service) installPlan(runID id.ID, target asset.Target, addresses []neti
 		if err != nil {
 			return err
 		}
-		discovery := task.Unit{ScanRunID: runID, TargetID: target.ID, ObservationPointID: s.pointID, UnitType: "host_discovery", StageKey: "host_discovery:" + addr.String(), RequiredCapabilities: []string{"tcp_connect"}, Input: payload, Priority: 0, CreatedAt: now}
-		if err := s.tasks.AddUnit(discovery); err != nil && !errors.Is(err, task.ErrDuplicateStage) {
-			return err
+		if plan.Transport == "udp" {
+			probe := task.Unit{ScanRunID: runID, TargetID: target.ID, ObservationPointID: s.pointID, UnitType: "udp_probe", StageKey: "udp_probe:" + addr.String(), RequiredCapabilities: []string{"udp_dns"}, Input: payload, Priority: 1, CreatedAt: now}
+			if _, err := s.ensureUnit(probe); err != nil {
+				return err
+			}
+			continue
 		}
 		portScan := task.Unit{ScanRunID: runID, TargetID: target.ID, ObservationPointID: s.pointID, UnitType: "port_scan", StageKey: "port_scan:" + addr.String(), RequiredCapabilities: []string{"tcp_connect"}, Input: payload, Priority: 1, CreatedAt: now}
-		if err := s.tasks.AddUnit(portScan); err != nil && !errors.Is(err, task.ErrDuplicateStage) {
+		portID, err := s.ensureUnit(portScan)
+		if err != nil {
+			return err
+		}
+		discovery := task.Unit{ScanRunID: runID, TargetID: target.ID, ObservationPointID: s.pointID, UnitType: "host_discovery", StageKey: "host_discovery:" + addr.String(), RequiredCapabilities: []string{"tcp_connect"}, Input: payload, Priority: 2, CreatedAt: now}
+		if containsOperation(grant, scope.OpConnect) {
+			discovery.DependsOn = []id.ID{portID}
+		}
+		if _, err := s.ensureUnit(discovery); err != nil {
 			return err
 		}
 	}
-	collectPayload, err := json.Marshal(map[string]any{"operations": []string{"collect_os_info", "collect_interfaces", "collect_listening_sockets"}})
-	if err != nil {
-		return err
-	}
-	collectUnit := task.Unit{ScanRunID: runID, TargetID: target.ID, ObservationPointID: s.pointID, UnitType: "host_collect", StageKey: "host_collect", RequiredCapabilities: []string{"host_collect"}, Input: collectPayload, Priority: 1, CreatedAt: now}
-	if err := s.tasks.AddUnit(collectUnit); err != nil && !errors.Is(err, task.ErrDuplicateStage) {
-		return err
-	}
-	if !containsOperation(grant, scope.OpConfigCheck) {
-		_, units, _ := s.tasks.Snapshot(runID)
-		for _, unit := range units {
-			if unit.UnitType == "host_collect" && (unit.Status == task.UnitQueued || unit.Status == task.UnitRetryWait) {
-				_ = s.tasks.MarkSkipped(unit.ID, "operation_denied", now)
+	if plan.FindingID == "" {
+		collectPayload, err := json.Marshal(map[string]any{"operations": collect.Operations})
+		if err != nil {
+			return err
+		}
+		collectUnit := task.Unit{ScanRunID: runID, TargetID: target.ID, ObservationPointID: s.pointID, UnitType: "host_collect", StageKey: "host_collect", RequiredCapabilities: []string{"host_collect"}, Input: collectPayload, Priority: 1, CreatedAt: now}
+		if err := s.tasks.AddUnit(collectUnit); err != nil && !errors.Is(err, task.ErrDuplicateStage) {
+			return err
+		}
+		if !containsOperation(grant, scope.OpConfigCheck) {
+			_, units, _ := s.tasks.Snapshot(runID)
+			for _, unit := range units {
+				if unit.UnitType == "host_collect" && (unit.Status == task.UnitQueued || unit.Status == task.UnitRetryWait) {
+					if err := s.tasks.MarkSkipped(unit.ID, "operation_denied", now); err != nil {
+						return err
+					}
+				}
 			}
 		}
 	}
@@ -357,6 +487,184 @@ func (s *Service) installPlan(runID id.ID, target asset.Target, addresses []neti
 		return err
 	}
 	return nil
+}
+
+// ensureUnit 追加执行单元。相同阶段键已经存在时返回已有单元标识。
+// ensureUnit appends an execution unit. When the same stage key already exists, it returns the existing unit identifier.
+func (s *Service) ensureUnit(unit task.Unit) (id.ID, error) {
+	if unit.ID.IsZero() {
+		var err error
+		unit.ID, err = id.New()
+		if err != nil {
+			return id.ID{}, err
+		}
+	}
+	err := s.tasks.AddUnit(unit)
+	if err == nil {
+		return unit.ID, nil
+	}
+	if !errors.Is(err, task.ErrDuplicateStage) {
+		return id.ID{}, err
+	}
+	_, units, snapErr := s.tasks.Snapshot(unit.ScanRunID)
+	if snapErr != nil {
+		return id.ID{}, snapErr
+	}
+	for _, existing := range units {
+		if existing.StageKey == unit.StageKey && existing.TargetID == unit.TargetID && existing.ObservationPointID == unit.ObservationPointID {
+			return existing.ID, nil
+		}
+	}
+	return id.ID{}, err
+}
+
+func verificationOperations(packs []rule.Pack, ruleID id.ID, ruleKey string) []string {
+	var fallback []string
+	for _, pack := range packs {
+		if pack.Type != "config" || (pack.Status != "published" && pack.Status != "deprecated") {
+			continue
+		}
+		for _, item := range pack.Configs {
+			if !ruleID.IsZero() && item.ID == ruleID {
+				return item.ReadOperations()
+			}
+			if item.Key == ruleKey && item.Operation != "" && len(fallback) == 0 {
+				fallback = item.ReadOperations()
+			}
+		}
+	}
+	return fallback
+}
+
+// startCollectVerification 为配置 Finding 创建主机采集。采集范围是规则的主操作和适用条件点名的操作。它不经过端口规划，也不拨号。
+// startCollectVerification creates host collection for a configuration finding. The collection covers the rule's primary operation and the operations named by its applicability conditions. It does not pass through port planning and does not dial.
+func (s *Service) startCollectVerification(ctx context.Context, finding Finding, occurrence Occurrence, operations []string, grantID id.ID, now time.Time) (task.Run, error) {
+	runID, err := id.New()
+	if err != nil {
+		return task.Run{}, err
+	}
+	targetID, err := id.New()
+	if err != nil {
+		return task.Run{}, err
+	}
+	environment := s.currentEnvironment(now)
+	s.mu.Lock()
+	err = s.commitState(ctx, func() error {
+		grant, ok := s.grants[grantID]
+		if !ok {
+			return fmt.Errorf("create scan: grant not found")
+		}
+		if grant.Status != scope.StatusActive {
+			return fmt.Errorf("create scan: grant status %s", grant.Status)
+		}
+		if !containsOperation(grant, scope.OpConfigCheck) {
+			return planFailure{summary: "operation_denied"}
+		}
+		allowedPoint := false
+		for _, pointID := range grant.ObservationPointIDs {
+			if pointID == s.pointID {
+				allowedPoint = true
+				break
+			}
+		}
+		if !allowedPoint {
+			return planFailure{summary: "observation_point_denied"}
+		}
+		digest, err := grant.Digest()
+		if err != nil {
+			return err
+		}
+		configPacks := addUnique(s.publishedConfigPacks(), s.configPackVersion(finding.RuleID))
+		body, err := json.Marshal(planBody{
+			FindingID: finding.ID.String(), OccurrenceID: occurrence.ID.String(),
+			ConditionDigest: occurrence.ConditionDigest, VulnerabilityID: finding.VulnerabilityID, Environment: &environment,
+			ConfigRules: configPacks,
+		})
+		if err != nil {
+			return err
+		}
+		budget, err := budgetSnapshot(grant)
+		if err != nil {
+			return err
+		}
+		target := asset.Target{ID: targetID, TargetType: "asset", RawValue: finding.AssetID.String(), NormalizedValue: finding.AssetID.String(), CreatedAt: now}
+		s.catalog.AddTarget(target)
+		run := versionedRun(task.Run{
+			ID: runID, Name: "verification:" + finding.VulnerabilityID, TargetIDs: []id.ID{target.ID}, ScopeGrantID: grant.ID, ScopeDigest: digest,
+			TriggerType: "verification", EffectiveBudget: budget, IntelSnapshotID: s.latestSnapshotID(),
+			ObservationPointIDs: []id.ID{s.pointID}, CreatedAt: now, Plan: body,
+		})
+		if err := s.tasks.CreateRun(run); err != nil {
+			return err
+		}
+		s.frozen[runID] = grant
+		account := scope.NewAccount(scope.FromGrant(grant), now)
+		if err := account.TryTarget(); err != nil {
+			return planFailure{summary: err.Error()}
+		}
+		s.accounts[runID] = account
+		payload, err := json.Marshal(map[string]any{"operations": operations})
+		if err != nil {
+			return err
+		}
+		if _, err := s.ensureUnit(task.Unit{
+			ScanRunID: runID, TargetID: target.ID, ObservationPointID: s.pointID, UnitType: "host_collect", StageKey: "host_collect",
+			RequiredCapabilities: []string{"host_collect"}, Input: payload, Priority: 1, CreatedAt: now,
+		}); err != nil {
+			return err
+		}
+		return s.tasks.MarkRunning(runID, now)
+	})
+	s.mu.Unlock()
+	if err != nil {
+		var failed planFailure
+		if errors.As(err, &failed) {
+			s.mu.Lock()
+			_, _, snapErr := s.tasks.Snapshot(runID)
+			s.mu.Unlock()
+			if snapErr == nil {
+				return s.failPlanning(runID, failed.Error(), now)
+			}
+		}
+		return task.Run{}, err
+	}
+	s.mu.Lock()
+	run, _, err := s.tasks.Snapshot(runID)
+	s.mu.Unlock()
+	return run, err
+}
+
+func scanTransport(requested, targetTransport string) (string, error) {
+	transport := strings.ToLower(strings.TrimSpace(requested))
+	if transport == "" {
+		transport = strings.ToLower(strings.TrimSpace(targetTransport))
+	}
+	if transport == "" {
+		transport = "tcp"
+	}
+	if transport != "tcp" && transport != "udp" {
+		return "", fmt.Errorf("create scan: transport %s", transport)
+	}
+	return transport, nil
+}
+
+func planOperation(grant scope.Grant, transport string) (string, error) {
+	if transport == "udp" {
+		if !containsOperation(grant, scope.OpProtocolProbe) {
+			return "", planFailure{summary: "operation_denied"}
+		}
+		return scope.OpProtocolProbe, nil
+	}
+	if transport != "tcp" {
+		return "", planFailure{summary: "transport_denied"}
+	}
+	if containsOperation(grant, scope.OpConnect) {
+		return scope.OpConnect, nil
+	}
+	if containsOperation(grant, scope.OpDiscovery) {
+		return scope.OpDiscovery, nil
+	}
+	return "", planFailure{summary: "operation_denied"}
 }
 
 func (s *Service) failPlanning(runID id.ID, summary string, now time.Time) (task.Run, error) {
