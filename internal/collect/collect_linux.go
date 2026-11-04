@@ -18,6 +18,14 @@ func collectPlatform(operation string) (Result, error) {
 		return collectInterfaces()
 	case "collect_listening_sockets":
 		return collectListening()
+	case "collect_processes":
+		return collectProcesses()
+	case "collect_services":
+		return collectServices()
+	case "collect_packages":
+		return collectPackages()
+	case "collect_firewall_config":
+		return collectFirewall()
 	default:
 		return Result{Operation: operation, Status: StatusUnsupported}, nil
 	}

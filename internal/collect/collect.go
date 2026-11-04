@@ -60,16 +60,11 @@ func CollectRequested(requested []string) ([]Result, error) {
 			out = append(out, Result{Operation: op, Status: StatusNotRequested})
 			continue
 		}
-		switch op {
-		case "collect_processes", "collect_services", "collect_packages", "collect_firewall_config":
-			out = append(out, Result{Operation: op, Status: StatusUnsupported})
-		default:
-			item, err := collectPlatform(op)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, item)
+		item, err := collectPlatform(op)
+		if err != nil {
+			return nil, err
 		}
+		out = append(out, item)
 	}
 	return out, nil
 }
