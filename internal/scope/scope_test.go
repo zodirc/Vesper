@@ -2,6 +2,7 @@ package scope
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"testing"
 	"time"
@@ -33,6 +34,27 @@ func TestCheckAllowsExplicitLoopback(t *testing.T) {
 	})
 	if !d.Allowed {
 		t.Fatalf("decision = %+v", d)
+	}
+}
+
+func TestNormalizeHostnameUsesIDNA(t *testing.T) {
+	got, err := NormalizeHostname("München.Example.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	puny, err := NormalizeHostname("xn--mnchen-3ya.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "xn--mnchen-3ya.example" || got != puny {
+		t.Fatalf("normalized = %s puny = %s", got, puny)
+	}
+	plain, err := NormalizeHostname("Example.COM.")
+	if err != nil || plain != "example.com" {
+		t.Fatalf("ascii = %s err = %v", plain, err)
+	}
+	if _, err := NormalizeHostname("-bad.example"); err == nil {
+		t.Fatal("illegal label was accepted")
 	}
 }
 
@@ -111,6 +133,34 @@ func TestAcquireConnectionStopsAtCeiling(t *testing.T) {
 	err := account.AcquireConnection(context.Background(), time.Now().UTC())
 	if err == nil {
 		t.Fatal("expected budget error")
+	}
+}
+
+func TestCancelDuringRateWaitReleasesConnection(t *testing.T) {
+	start := time.Now().UTC()
+	account := NewAccount(Budget{MaxConnections: 2, MaxRequests: 2, MaxRatePerSecond: 0.2, MaxRuntime: time.Minute}, start)
+	if err := account.AcquireConnection(context.Background(), start); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- account.AcquireConnection(ctx, start)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && account.ExportUsage().Connections < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	if account.ExportUsage().Connections != 2 {
+		t.Fatal("rate wait did not reserve a connection")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if account.ExportUsage().Connections != 1 {
+		t.Fatalf("connections = %d", account.ExportUsage().Connections)
 	}
 }
 

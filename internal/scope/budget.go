@@ -53,14 +53,17 @@ func (a *Account) TryAddress() error {
 // AcquireConnection 占用一次连接尝试，并按速率上限等待。
 // AcquireConnection reserves one connection attempt and waits for the rate ceiling.
 //
-// 超过连接次数或运行时长时立即拒绝，不等待。取消上下文会中止速率等待。
-// It rejects immediately when the connection count or runtime is exhausted. A canceled context aborts rate waiting.
+// 超过连接次数或运行时长时立即拒绝，不等待。取消上下文会中止速率等待，并释放这次尚未拨号的连接计数。
+// It rejects immediately when the connection count or runtime is exhausted. A canceled context aborts rate waiting and releases the connection count because no dial has happened.
 func (a *Account) AcquireConnection(ctx context.Context, now time.Time) error {
 	return a.acquire(ctx, now, true)
 }
 
 // AcquireRequest 占用一次协议请求。
 // AcquireRequest reserves one protocol request.
+//
+// 取消速率等待时释放这次尚未发出的请求计数。
+// A canceled rate wait releases the request count because the request was not sent.
 func (a *Account) AcquireRequest(ctx context.Context, now time.Time) error {
 	return a.acquire(ctx, now, false)
 }
@@ -81,8 +84,10 @@ func (a *Account) acquire(ctx context.Context, now time.Time, connection bool) e
 		return errBudget("max_requests")
 	}
 	wait := time.Duration(0)
+	gap := time.Duration(0)
+	reservedNext := time.Time{}
 	if a.limit.MaxRatePerSecond > 0 {
-		gap := time.Duration(float64(time.Second) / a.limit.MaxRatePerSecond)
+		gap = time.Duration(float64(time.Second) / a.limit.MaxRatePerSecond)
 		if now.Before(a.nextAllowed) {
 			wait = a.nextAllowed.Sub(now)
 		}
@@ -91,6 +96,7 @@ func (a *Account) acquire(ctx context.Context, now time.Time, connection bool) e
 			base = a.nextAllowed
 		}
 		a.nextAllowed = base.Add(gap)
+		reservedNext = a.nextAllowed
 	}
 	if connection {
 		a.connections++
@@ -105,9 +111,49 @@ func (a *Account) acquire(ctx context.Context, now time.Time, connection bool) e
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
+		a.rollbackReservation(connection, reservedNext, gap)
 		return ctx.Err()
 	case <-timer.C:
 		return nil
+	}
+}
+
+// rollbackReservation 归还一次尚未执行的连接或请求计数。
+// rollbackReservation returns one connection or request count that was reserved but not executed.
+//
+// 只有本调用仍是速率队列末尾时才回退 nextAllowed，避免撤销后来调用已经排上的时隙。
+// nextAllowed moves backward only while this call is still the tail of the rate queue, so a later reservation keeps its slot.
+func (a *Account) rollbackReservation(connection bool, reservedNext time.Time, gap time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if connection {
+		if a.connections > 0 {
+			a.connections--
+		}
+	} else if a.requests > 0 {
+		a.requests--
+	}
+	if gap > 0 && !reservedNext.IsZero() && a.nextAllowed.Equal(reservedNext) {
+		a.nextAllowed = reservedNext.Add(-gap)
+	}
+}
+
+// ReleaseReservation 归还一次已经占用但尚未执行的连接或请求。
+// ReleaseReservation returns one connection or request reservation that was counted but not executed.
+//
+// 不回退速率时隙。后来的占用可能已经排在这次占用之后。
+// It does not move the rate slot backward. A later reservation may already be queued behind this one.
+func (a *Account) ReleaseReservation(connection bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if connection {
+		if a.connections > 0 {
+			a.connections--
+		}
+		return
+	}
+	if a.requests > 0 {
+		a.requests--
 	}
 }
 

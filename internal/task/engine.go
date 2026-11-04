@@ -93,8 +93,8 @@ type Run struct {
 	StartedAt           *time.Time
 	FinishedAt          *time.Time
 	CancelRequestedAt   *time.Time
-	// Plan 保存规划输入，供 planning 中断后继续生成单元。
-	// Plan stores the planning input so unit creation can continue after planning is interrupted.
+	// Plan 保存规划输入，供 planning 中断后继续生成单元。创建任务时写入的观察点环境在后续更新允许地址时保留。
+	// Plan stores the planning input so unit creation can continue after planning is interrupted. The observation-point environment written at task creation is kept when allowed addresses are updated later.
 	Plan json.RawMessage
 }
 

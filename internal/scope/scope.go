@@ -14,6 +14,8 @@ import (
 	"slices"
 	"time"
 
+	"golang.org/x/net/idna"
+
 	"github.com/zodirc/Vesper/internal/id"
 )
 
@@ -127,8 +129,8 @@ type CheckInput struct {
 // kind 取 ip、cidr 或 hostname。value 是规范化前的文本。
 // kind is ip, cidr, or hostname. value is the text before normalization.
 //
-// 无法解析时返回错误。hostname 只接受 ASCII 域名；非 ASCII 域名拒绝登记，避免在没有 IDNA 转换时保存歧义标识。
-// It returns an error when the value cannot be parsed. Hostnames must be ASCII; non-ASCII names are rejected so an ambiguous identifier is not stored without IDNA conversion.
+// 无法解析时返回错误。hostname 按 IDNA2008 Lookup 转为 A-label 后再参与授权比较。
+// It returns an error when the value cannot be parsed. Hostnames are converted to A-labels with IDNA2008 Lookup before authorization comparison.
 func ParseSelector(kind, value string) (Selector, error) {
 	switch kind {
 	case "ip":
@@ -156,8 +158,11 @@ func ParseSelector(kind, value string) (Selector, error) {
 	}
 }
 
-// NormalizeHostname 规范化 ASCII 域名：去除尾点并转为小写。
-// NormalizeHostname normalizes an ASCII hostname by removing a trailing dot and lowercasing it.
+// NormalizeHostname 把域名规范为用于匹配的 ASCII 形式。
+// NormalizeHostname canonicalizes a hostname into the ASCII form used for matching.
+//
+// 去掉一个结尾的点后，使用 IDNA2008 Lookup 转为小写 A-label。Unicode 名称和对应的 punycode 得到同一结果。空名称、空标签和非法标签返回错误。
+// After removing one trailing dot, IDNA2008 Lookup converts the name to a lowercase A-label. A Unicode name and its punycode produce the same result. Empty names, empty labels, and illegal labels return an error.
 func NormalizeHostname(value string) (string, error) {
 	if value == "" {
 		return "", fmt.Errorf("normalize hostname: empty")
@@ -168,31 +173,14 @@ func NormalizeHostname(value string) (string, error) {
 	if value == "" {
 		return "", fmt.Errorf("normalize hostname: empty")
 	}
-	out := make([]byte, len(value))
-	label := 0
-	for i := 0; i < len(value); i++ {
-		c := value[i]
-		switch {
-		case c >= 'A' && c <= 'Z':
-			out[i] = c - 'A' + 'a'
-			label++
-		case c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-':
-			out[i] = c
-			label++
-		case c == '.':
-			if label == 0 || i == len(value)-1 {
-				return "", fmt.Errorf("normalize hostname %q: empty label", value)
-			}
-			out[i] = c
-			label = 0
-		default:
-			return "", fmt.Errorf("normalize hostname %q: non-ascii names require idna and are rejected", value)
-		}
+	ascii, err := idna.Lookup.ToASCII(value)
+	if err != nil {
+		return "", fmt.Errorf("normalize hostname %q: %w", value, err)
 	}
-	if out[0] == '-' || out[len(out)-1] == '-' {
-		return "", fmt.Errorf("normalize hostname %q: invalid hyphen", value)
+	if ascii == "" {
+		return "", fmt.Errorf("normalize hostname: empty")
 	}
-	return string(out), nil
+	return ascii, nil
 }
 
 // Check 判断输入是否可以被冻结后的授权允许。
