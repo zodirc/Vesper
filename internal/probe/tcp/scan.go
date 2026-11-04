@@ -24,10 +24,20 @@ type Result struct {
 // Scan 按有限并发对同一 IP 的端口执行 Connect 扫描。
 // Scan runs a connect scan against ports on one IP with bounded concurrency.
 //
+// operation 是这次拨号提交给授权校验的操作名，取 discovery 或 connect。空操作名不拨号。
+// operation is the authorization operation submitted for each dial. It is discovery or connect. An empty operation does not dial.
+//
 // 尚未开始的端口在取消后记为 not_scanned。连接被拒绝记为 closed，超时记为 no_response。
 // Ports that have not started are recorded as not_scanned after cancellation. A refused connection is closed, and a timeout is no_response.
-func Scan(ctx context.Context, dial probesdk.Dialer, ip netip.Addr, ports []int, concurrency int, now func() time.Time) []Result {
+func Scan(ctx context.Context, dial probesdk.Dialer, ip netip.Addr, ports []int, concurrency int, operation string, now func() time.Time) []Result {
 	results := make([]Result, len(ports))
+	if operation == "" {
+		observed := now().UTC()
+		for i, port := range ports {
+			results[i] = Result{Port: port, State: "error", Error: "dial operation is empty", ObservedAt: observed}
+		}
+		return results
+	}
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -43,19 +53,19 @@ func Scan(ctx context.Context, dial probesdk.Dialer, ip netip.Addr, ports []int,
 		go func(index, port int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[index] = dialOne(ctx, dial, ip, port, now)
+			results[index] = dialOne(ctx, dial, ip, port, operation, now)
 		}(i, port)
 	}
 	wg.Wait()
 	return results
 }
 
-func dialOne(ctx context.Context, dial probesdk.Dialer, ip netip.Addr, port int, now func() time.Time) Result {
+func dialOne(ctx context.Context, dial probesdk.Dialer, ip netip.Addr, port int, operation string, now func() time.Time) Result {
 	observed := now().UTC()
 	if ctx.Err() != nil {
 		return Result{Port: port, State: "not_scanned", ObservedAt: observed}
 	}
-	conn, err := dial.DialTCP(ctx, ip, port, "connect")
+	conn, err := dial.DialTCP(ctx, ip, port, operation)
 	if err != nil {
 		return Result{Port: port, State: probesdk.Classify(err), Error: err.Error(), ObservedAt: observed}
 	}
