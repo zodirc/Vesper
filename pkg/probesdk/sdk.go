@@ -43,6 +43,12 @@ const (
 	// ClassEvidence 表示证据没有完成持久化和摘要校验。
 	// ClassEvidence means evidence persistence or digest verification did not complete.
 	ClassEvidence = "evidence_failed"
+	// ClassICMPUnreachable 表示收到 ICMP 端口不可达。是否等于关闭由具体探针规格决定。
+	// ClassICMPUnreachable means an ICMP port-unreachable error was received. Whether that means closed is decided by the probe spec.
+	ClassICMPUnreachable = "icmp_port_unreachable"
+	// ClassNetworkUnreachable 表示网络或主机不可达。
+	// ClassNetworkUnreachable means the network or host is unreachable.
+	ClassNetworkUnreachable = "network_unreachable"
 )
 
 // Error 是带稳定分类的探针错误。
@@ -73,6 +79,10 @@ func Classify(err error) string {
 			return "not_scanned"
 		case ClassUnsupported, ClassPermission:
 			return "unsupported"
+		case ClassNetworkUnreachable:
+			return "unreachable"
+		case ClassICMPUnreachable:
+			return "unknown"
 		default:
 			return "error"
 		}
@@ -102,13 +112,19 @@ type Authorizer interface {
 	Authorize(ctx context.Context, ip netip.Addr, port int, transport, operation string) error
 }
 
-// Dialer 是受控 TCP 连接入口。
-// Dialer is the controlled TCP connection entry.
+// Dialer 是受控网络入口。TCP 连接计入连接预算，UDP 报文计入请求预算。
+// Dialer is the controlled network entry. A TCP connection counts against the connection budget, and a UDP datagram counts against the request budget.
 type Dialer struct {
 	Auth    Authorizer
 	Budget  *scope.Account
 	Timeout time.Duration
 	Now     func() time.Time
+	// PersistBudget 在连接或请求已经计入本地账本、网络操作尚未开始时调用。为空表示调用方不持久化预算。
+	// PersistBudget is called after a connection or request is counted in the local ledger and before the network operation starts. A nil value means the caller does not persist the budget.
+	//
+	// 返回错误时不发起网络操作，并归还这次尚未执行的计数。
+	// An error skips the network operation and releases the reservation that was not executed.
+	PersistBudget func(context.Context) error
 }
 
 // DialTCP 在授权和预算通过后连接指定 IP。
@@ -139,6 +155,9 @@ func (d Dialer) DialTCP(ctx context.Context, ip netip.Addr, port int, operation 
 		}
 		return nil, &Error{Class: ClassExecution, Message: err.Error()}
 	}
+	if err := d.persist(ctx, true); err != nil {
+		return nil, err
+	}
 	timeout := d.Timeout
 	if timeout <= 0 {
 		timeout = 3 * time.Second
@@ -157,6 +176,17 @@ func (d Dialer) DialTCP(ctx context.Context, ip netip.Addr, port int, operation 
 		return nil, &Error{Class: ClassTimeout, Message: "dial timed out"}
 	}
 	return nil, err
+}
+
+func (d Dialer) persist(ctx context.Context, connection bool) error {
+	if d.PersistBudget == nil {
+		return nil
+	}
+	if err := d.PersistBudget(ctx); err != nil {
+		d.Budget.ReleaseReservation(connection)
+		return &Error{Class: ClassExecution, Message: err.Error()}
+	}
+	return nil
 }
 
 // ReadLimited 从连接读取至多 maxBytes，并受上下文截止时间约束。
