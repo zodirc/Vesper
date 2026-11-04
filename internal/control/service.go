@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,33 +78,37 @@ type ScanInput struct {
 // Service 协调单机扫描闭环。
 // Service coordinates the single-node scan loop.
 type Service struct {
-	mu           sync.Mutex
-	now          func() time.Time
-	tasks        *task.Engine
-	catalog      *asset.Catalog
-	evidence     evidence.Store
-	worker       task.Worker
-	pointID      id.ID
-	grants       map[id.ID]scope.Grant
-	frozen       map[id.ID]scope.Grant
-	accounts     map[id.ID]*scope.Account
-	baselines    map[id.ID]scope.Usage
-	observations []Observation
-	idempotency  map[string]id.ID
-	evidenceRows []EvidenceRecord
-	hypotheses   []identity.Hypothesis
-	products     map[id.ID]Product
-	aliases      []identity.Alias
-	statements   []assess.Statement
-	snapshots    []IntelSnapshot
-	detections   []Detection
-	findings     map[string]*Finding
-	occurrences  []Occurrence
-	revisions    []Revision
-	resolver     Resolver
-	DialTimeout  time.Duration
-	db           *pgStore
-	packs        []rule.Pack
+	mu            sync.Mutex
+	now           func() time.Time
+	tasks         *task.Engine
+	catalog       *asset.Catalog
+	evidence      evidence.Store
+	worker        task.Worker
+	pointID       id.ID
+	principal     id.ID
+	grants        map[id.ID]scope.Grant
+	frozen        map[id.ID]scope.Grant
+	accounts      map[id.ID]*scope.Account
+	baselines     map[id.ID]scope.Usage
+	observations  []Observation
+	idempotency   map[string]id.ID
+	evidenceRows  []EvidenceRecord
+	hypotheses    []identity.Hypothesis
+	products      map[id.ID]Product
+	aliases       []identity.Alias
+	statements    []assess.Statement
+	snapshots     []IntelSnapshot
+	detections    []Detection
+	findings      map[string]*Finding
+	occurrences   []Occurrence
+	dispositions  []Disposition
+	revisions     []Revision
+	resolver      Resolver
+	DialTimeout   time.Duration
+	locationLabel string
+	db            *pgStore
+	packs         []rule.Pack
+	active        []activeTemplate
 }
 
 // New 创建本机观察点、在线 Worker 和应用服务。
@@ -127,15 +132,19 @@ func New(evidenceRoot string, now func() time.Time) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	principal, err := id.New()
+	if err != nil {
+		return nil, err
+	}
 	return &Service{
 		now: now, tasks: task.NewEngine(30 * time.Second), catalog: asset.NewCatalog(),
-		evidence: evidence.Store{Root: evidenceRoot}, pointID: pointID,
+		evidence: evidence.Store{Root: evidenceRoot}, pointID: pointID, principal: principal,
 		worker: task.Worker{ID: workerID, ObservationPointID: pointID, Status: "online", Capabilities: map[string]struct{}{
-			"tcp_connect": {}, "protocol_http": {}, "protocol_tls": {}, "protocol_ssh": {}, "host_collect": {},
+			"tcp_connect": {}, "protocol_http": {}, "protocol_tls": {}, "protocol_ssh": {}, "protocol_ftp": {}, "protocol_smtp": {}, "protocol_mysql": {}, "protocol_postgresql": {}, "protocol_redis": {}, "protocol_mongodb": {}, "protocol_tds": {}, "protocol_tns": {}, "protocol_cql": {}, "protocol_bolt": {}, "protocol_memcached": {}, "protocol_clickhouse": {}, "udp_dns": {}, "host_collect": {}, "active_detection": {},
 		}},
 		grants: map[id.ID]scope.Grant{}, frozen: map[id.ID]scope.Grant{}, accounts: map[id.ID]*scope.Account{},
 		baselines:   map[id.ID]scope.Usage{},
-		idempotency: map[string]id.ID{}, products: map[id.ID]Product{}, findings: map[string]*Finding{},
+		idempotency: map[string]id.ID{}, products: map[id.ID]Product{}, findings: map[string]*Finding{}, active: []activeTemplate{},
 		resolver: defaultResolver, DialTimeout: 2 * time.Second, packs: packs,
 	}, nil
 }
@@ -160,6 +169,12 @@ func Open(ctx context.Context, evidenceRoot, dsn, migrationFile string, now func
 		store.pool.Close()
 		return nil, err
 	}
+	principal, err := store.ensurePrincipal(ctx, service.principal)
+	if err != nil {
+		store.pool.Close()
+		return nil, err
+	}
+	service.principal = principal
 	if err := service.reconcileEvidence(ctx); err != nil {
 		store.pool.Close()
 		return nil, err
@@ -245,7 +260,16 @@ func (s *Service) ApproveGrant(grantID, actor id.ID) error {
 
 // RevokeGrant 撤销授权。正在使用该授权的后续连接会被拒绝。
 // RevokeGrant revokes a grant. Later connections that use it are denied.
+//
+// grantID 必须是已存在的授权。actor 是执行撤销的用户。reason 不能为空。
+// grantID must be an existing grant. actor is the user performing the revocation. reason must not be empty.
+//
+// 授权不存在或原因为空时返回错误。已经撤销的授权会再写一条撤销审计。
+// It returns an error when the grant does not exist or the reason is empty. An already revoked grant receives another revocation audit record.
 func (s *Service) RevokeGrant(grantID, actor id.ID, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		return fmt.Errorf("revoke grant: reason is empty")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.commitState(context.Background(), func() error {
@@ -260,6 +284,62 @@ func (s *Service) RevokeGrant(grantID, actor id.ID, reason string) error {
 		s.grants[grantID] = grant
 		return s.audit(grantID, "revoke", actor)
 	})
+}
+
+// Grant 返回授权副本。
+// Grant returns a copy of one grant.
+//
+// grantID 不存在时返回错误。
+// It returns an error when grantID does not exist.
+func (s *Service) Grant(grantID id.ID) (scope.Grant, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	grant, ok := s.grants[grantID]
+	if !ok {
+		return scope.Grant{}, fmt.Errorf("grant %s: not found", grantID)
+	}
+	grant.Selectors = append([]scope.Selector(nil), grant.Selectors...)
+	grant.AllowedTransports = append([]string(nil), grant.AllowedTransports...)
+	grant.Ports = append([]scope.PortRange(nil), grant.Ports...)
+	grant.AllowedOperations = append([]string(nil), grant.AllowedOperations...)
+	grant.ObservationPointIDs = append([]id.ID(nil), grant.ObservationPointIDs...)
+	return grant, nil
+}
+
+// Revisions 返回某条授权的审计记录副本，顺序与写入顺序一致。
+// Revisions returns copies of one grant's audit records in write order.
+func (s *Service) Revisions(grantID id.ID) []Revision {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Revision
+	for _, item := range s.revisions {
+		if item.GrantID != grantID {
+			continue
+		}
+		item.Content = append(json.RawMessage(nil), item.Content...)
+		out = append(out, item)
+	}
+	return out
+}
+
+// expireGrants 把已过 valid_until 的 active 授权标为 expired，并写入审计。
+// expireGrants marks active grants past valid_until as expired and writes an audit record.
+//
+// 操作者是本机 Worker。这是控制进程根据有效期作出的状态迁移，不是用户撤销。
+// The actor is the local worker. This is the control process applying the validity window, not a user revocation.
+func (s *Service) expireGrants() error {
+	now := s.now().UTC()
+	for grantID, grant := range s.grants {
+		if grant.Status != scope.StatusActive || grant.ValidUntil == nil || now.Before(grant.ValidUntil.UTC()) {
+			continue
+		}
+		grant.Status = scope.StatusExpired
+		s.grants[grantID] = grant
+		if err := s.audit(grantID, "expire", s.worker.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AddProduct 登记规范产品和别名。
@@ -277,7 +357,7 @@ func (s *Service) AddProduct(ecosystem, name, canonicalKey, aliasValue string) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.products[productID] = product
-	s.aliases = append(s.aliases, identity.Alias{ID: aliasID, ProductID: productID, Source: "catalog", AliasType: "product_name", Value: aliasValue})
+	s.aliases = append(s.aliases, identity.Alias{ID: aliasID, ProductID: productID, Source: "catalog", AliasType: "product_name", Ecosystem: ecosystem, Value: aliasValue})
 	if err := s.flush(context.Background()); err != nil {
 		return Product{}, err
 	}

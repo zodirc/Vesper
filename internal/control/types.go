@@ -57,6 +57,7 @@ type Detection struct {
 	ID              id.ID
 	AssessmentRunID id.ID
 	EndpointID      id.ID
+	Executor        string
 	SubjectType     string
 	SubjectID       id.ID
 	RuleID          id.ID
@@ -93,6 +94,7 @@ type Finding struct {
 	Status           string
 	FirstSeenAt      time.Time
 	LastSeenAt       time.Time
+	ResolvedAt       *time.Time
 	LastOccurrenceID id.ID
 }
 
