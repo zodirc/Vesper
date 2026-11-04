@@ -101,6 +101,10 @@ func (d *pgStore) load(ctx context.Context, s *Service) error {
 	if err != nil {
 		return err
 	}
+	dispositions, err := loadDispositions(ctx, tx)
+	if err != nil {
+		return err
+	}
 	loadedPacks, err := loadPacks(ctx, tx)
 	if err != nil {
 		return err
@@ -111,11 +115,26 @@ func (d *pgStore) load(ctx context.Context, s *Service) error {
 		}
 		loadedPacks = s.packs
 	}
+	var location *string
+	if err := tx.QueryRow(ctx, `SELECT location_label FROM observation_point WHERE name = 'local'`).Scan(&location); err != nil {
+		return fmt.Errorf("load observation point label: %w", err)
+	}
+	active, err := loadActiveTemplates(ctx, tx)
+	if err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit task load: %w", err)
 	}
 	s.pointID = pointID
+	if location != nil {
+		s.locationLabel = *location
+	}
 	s.worker = worker
+	if s.worker.Capabilities == nil {
+		s.worker.Capabilities = map[string]struct{}{}
+	}
+	s.worker.Capabilities["active_detection"] = struct{}{}
 	s.grants = grants
 	s.revisions = revisions
 	s.catalog.Reset(targets, endpoints, assets)
@@ -131,7 +150,9 @@ func (d *pgStore) load(ctx context.Context, s *Service) error {
 	s.detections = detections
 	s.findings = findings
 	s.occurrences = occurrences
+	s.dispositions = dispositions
 	s.packs = loadedPacks
+	s.active = active
 	s.frozen = map[id.ID]scope.Grant{}
 	s.accounts = map[id.ID]*scope.Account{}
 	s.baselines = map[id.ID]scope.Usage{}
@@ -817,6 +838,9 @@ func loadProducts(ctx context.Context, tx pgx.Tx) (map[id.ID]Product, []identity
 		if err != nil {
 			return nil, nil, err
 		}
+		if product, ok := products[item.ProductID]; ok {
+			item.Ecosystem = product.Ecosystem
+		}
 		aliases = append(aliases, item)
 	}
 	return products, aliases, aliasRows.Err()
@@ -965,10 +989,42 @@ func parseEPSS(value string) (float64, error) {
 	return score, nil
 }
 
+func loadActiveTemplates(ctx context.Context, tx pgx.Tx) ([]activeTemplate, error) {
+	rows, err := tx.Query(ctx, `
+SELECT id::text, pack_id::text, template_key, template_name, severity, cve_id, request_bound, content_digest, body, enabled
+FROM active_template`)
+	if err != nil {
+		return nil, fmt.Errorf("load active templates: %w", err)
+	}
+	defer rows.Close()
+	var out []activeTemplate
+	for rows.Next() {
+		var item activeTemplate
+		var idText, packText, body string
+		if err := rows.Scan(&idText, &packText, &item.Key, &item.Name, &item.Severity, &item.CVE, &item.RequestBound, &item.Digest, &body, &item.Enabled); err != nil {
+			return nil, err
+		}
+		item.ID, err = id.Parse(idText)
+		if err != nil {
+			return nil, err
+		}
+		item.PackID, err = id.Parse(packText)
+		if err != nil {
+			return nil, err
+		}
+		item.Body = []byte(body)
+		out = append(out, item)
+	}
+	if out == nil {
+		out = []activeTemplate{}
+	}
+	return out, rows.Err()
+}
+
 func loadHypotheses(ctx context.Context, tx pgx.Tx) ([]identity.Hypothesis, error) {
 	rows, err := tx.Query(ctx, `
 SELECT id::text, assessment_run_id::text, endpoint_id::text, observation_point_id::text, service_type, product_identity_id::text,
-       raw_product_name, raw_version, confidence::text, supporting_observation_ids::text[], contradicting_observation_ids::text[],
+       raw_product_name, raw_version, normalized_version, confidence::text, supporting_observation_ids::text[], contradicting_observation_ids::text[],
        fingerprint_rule_ids::text[], identity_status, fingerprint_pack_version, evaluated_at
 FROM service_hypothesis ORDER BY evaluated_at`)
 	if err != nil {
@@ -979,9 +1035,9 @@ FROM service_hypothesis ORDER BY evaluated_at`)
 	for rows.Next() {
 		var item identity.Hypothesis
 		var idText, assessmentText, endpointText, pointText string
-		var service, product, rawName, rawVersion *string
+		var service, product, rawName, rawVersion, normalized *string
 		var supporting, contradicting, rules []string
-		if err := rows.Scan(&idText, &assessmentText, &endpointText, &pointText, &service, &product, &rawName, &rawVersion, &item.Confidence,
+		if err := rows.Scan(&idText, &assessmentText, &endpointText, &pointText, &service, &product, &rawName, &rawVersion, &normalized, &item.Confidence,
 			&supporting, &contradicting, &rules, &item.IdentityStatus, &item.FingerprintPackVersion, &item.EvaluatedAt); err != nil {
 			return nil, err
 		}
@@ -1008,6 +1064,7 @@ FROM service_hypothesis ORDER BY evaluated_at`)
 		}
 		item.RawProductName = deref(rawName)
 		item.RawVersion = deref(rawVersion)
+		item.NormalizedVersion = deref(normalized)
 		item.SupportingObservationIDs, err = parseIDs(supporting)
 		if err != nil {
 			return nil, err
@@ -1029,7 +1086,7 @@ FROM service_hypothesis ORDER BY evaluated_at`)
 
 func loadDetections(ctx context.Context, tx pgx.Tx) ([]Detection, error) {
 	rows, err := tx.Query(ctx, `
-SELECT id::text, assessment_run_id::text, endpoint_id::text, subject_type, subject_id::text, rule_id::text, rule_version, vulnerability_id, result_status, severity, summary, matched_conditions, unmatched_conditions, evidence_record_ids::text[], evaluated_at FROM detection_result`)
+SELECT id::text, assessment_run_id::text, endpoint_id::text, executor_type, subject_type, subject_id::text, rule_id::text, rule_version, vulnerability_id, result_status, severity, summary, matched_conditions, unmatched_conditions, evidence_record_ids::text[], evaluated_at FROM detection_result`)
 	if err != nil {
 		return nil, fmt.Errorf("load detections: %w", err)
 	}
@@ -1040,7 +1097,7 @@ SELECT id::text, assessment_run_id::text, endpoint_id::text, subject_type, subje
 		var idText, assessmentText string
 		var endpointText, subjectText, ruleText, ruleVersion, vulnerability, severity, summary *string
 		var evidence []string
-		if err := rows.Scan(&idText, &assessmentText, &endpointText, &item.SubjectType, &subjectText, &ruleText, &ruleVersion, &vulnerability, &item.ResultStatus, &severity, &summary, &item.Matched, &item.Unmatched, &evidence, &item.EvaluatedAt); err != nil {
+		if err := rows.Scan(&idText, &assessmentText, &endpointText, &item.Executor, &item.SubjectType, &subjectText, &ruleText, &ruleVersion, &vulnerability, &item.ResultStatus, &severity, &summary, &item.Matched, &item.Unmatched, &evidence, &item.EvaluatedAt); err != nil {
 			return nil, err
 		}
 		item.ID, err = id.Parse(idText)
@@ -1084,7 +1141,7 @@ SELECT id::text, assessment_run_id::text, endpoint_id::text, subject_type, subje
 
 func loadFindings(ctx context.Context, tx pgx.Tx) (map[string]*Finding, []Occurrence, error) {
 	rows, err := tx.Query(ctx, `
-SELECT id::text, finding_key, finding_type, asset_id::text, endpoint_id::text, product_identity_id::text, rule_id::text, external_vulnerability_id, title, severity, status, first_seen_at, last_seen_at, last_occurrence_id::text
+SELECT id::text, finding_key, finding_type, asset_id::text, endpoint_id::text, product_identity_id::text, rule_id::text, external_vulnerability_id, title, severity, status, first_seen_at, last_seen_at, resolved_at, last_occurrence_id::text
 FROM finding`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load findings: %w", err)
@@ -1095,7 +1152,7 @@ FROM finding`)
 		var item Finding
 		var idText string
 		var asset, endpoint, product, ruleText, vulnerability, occurrence *string
-		if err := rows.Scan(&idText, &item.FindingKey, &item.FindingType, &asset, &endpoint, &product, &ruleText, &vulnerability, &item.Title, &item.Severity, &item.Status, &item.FirstSeenAt, &item.LastSeenAt, &occurrence); err != nil {
+		if err := rows.Scan(&idText, &item.FindingKey, &item.FindingType, &asset, &endpoint, &product, &ruleText, &vulnerability, &item.Title, &item.Severity, &item.Status, &item.FirstSeenAt, &item.LastSeenAt, &item.ResolvedAt, &occurrence); err != nil {
 			return nil, nil, err
 		}
 		item.ID, err = id.Parse(idText)
@@ -1172,6 +1229,47 @@ SELECT id::text, finding_id::text, assessment_run_id::text, detection_result_id:
 		occurrences = append(occurrences, item)
 	}
 	return findings, occurrences, occRows.Err()
+}
+
+func loadDispositions(ctx context.Context, tx pgx.Tx) ([]Disposition, error) {
+	rows, err := tx.Query(ctx, `
+SELECT id::text, finding_id::text, disposition_type, reason, scope, created_by::text, approved_by::text, valid_from, valid_until, created_at
+FROM disposition ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("load dispositions: %w", err)
+	}
+	defer rows.Close()
+	var out []Disposition
+	for rows.Next() {
+		var item Disposition
+		var idText, findingText string
+		var scope []byte
+		var createdBy, approvedBy *string
+		if err := rows.Scan(&idText, &findingText, &item.Type, &item.Reason, &scope, &createdBy, &approvedBy, &item.ValidFrom, &item.ValidUntil, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.ID, err = id.Parse(idText)
+		if err != nil {
+			return nil, err
+		}
+		item.FindingID, err = id.Parse(findingText)
+		if err != nil {
+			return nil, err
+		}
+		item.CreatedBy, err = parseIDValue(createdBy)
+		if err != nil {
+			return nil, err
+		}
+		item.ApprovedBy, err = parseIDValue(approvedBy)
+		if err != nil {
+			return nil, err
+		}
+		if len(scope) > 0 {
+			item.Scope = append(json.RawMessage(nil), scope...)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 func parseOptionalID(value *string) (*id.ID, error) {
