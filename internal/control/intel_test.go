@@ -119,7 +119,14 @@ func TestConfigurationConstraintBlocksAffected(t *testing.T) {
 		Ecosystem: "deb", KEV: true,
 		Ranges: []assess.Range{{Ecosystem: "deb", Start: "1.0.0", StartInclusive: true, End: "2.0.0", EndInclusive: true}},
 	}
-	if applicabilityFor("deb", "1.24.0", deb) != assess.InsufficientEvidence {
-		t.Fatal("deb range used a generic comparison")
+	if applicabilityFor("deb", "1.24.0~deb12u1", deb) != assess.Affected {
+		t.Fatal("debian revision was not compared")
+	}
+	if applicabilityFor("deb", "1.0~rc1", deb) != assess.NotAffected {
+		t.Fatal("debian prerelease was treated as affected")
+	}
+	deb.ConfigurationConstraints = []byte(`{"required":"auth"}`)
+	if applicabilityFor("deb", "1.24.0~deb12u1", deb) != assess.InsufficientEvidence {
+		t.Fatal("configuration constraint was ignored for deb")
 	}
 }

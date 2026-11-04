@@ -148,6 +148,65 @@ func TestRestartRestoresRunAndFinding(t *testing.T) {
 	}
 }
 
+func TestPersistedBudgetDoesNotShrinkAcrossRestart(t *testing.T) {
+	dsn := os.Getenv("VESPER_TEST_DSN")
+	if dsn == "" {
+		t.Skip("VESPER_TEST_DSN is not set")
+	}
+	resetDatabase(t, dsn)
+	now := time.Date(2026, 11, 3, 1, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	ctx := context.Background()
+	migration := filepath.Join("..", "..", "migrations")
+	first, err := Open(ctx, t.TempDir(), dsn, migration, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := id.MustNew()
+	grant, err := first.CreateGrant(GrantInput{
+		Name: "budget", SubjectType: "user",
+		Selectors:  []SelectorInput{{Kind: "ip", Value: "203.0.113.10"}},
+		Transports: []string{"tcp"}, Ports: []scope.PortRange{{Start: 9, End: 9}},
+		Operations: []string{scope.OpConnect}, ObservationPointIDs: []id.ID{first.ObservationPointID()},
+		ValidFrom: now.Add(-time.Minute), MaxTargets: 2, MaxAddresses: 2, MaxConnections: 4,
+		MaxRequests: 4, MaxConcurrency: 1, MaxRatePerSecond: 1000, MaxRuntimeSeconds: 60, MaxEvidenceBytes: 1000,
+	}, actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.ApproveGrant(grant.ID, actor); err != nil {
+		t.Fatal(err)
+	}
+	run, err := first.CreateScan(ctx, ScanInput{Name: "budget", Target: "203.0.113.10", Type: "ip", Ports: []int{9}, GrantID: grant.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := first.accounts[run.ID]
+	if account == nil {
+		t.Fatal("budget ledger missing")
+	}
+	if err := account.AcquireConnection(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.persistBudget(ctx, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	account.RestoreUsage(scope.Usage{Started: now})
+	if err := first.persistBudget(ctx, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+	second, err := Open(ctx, t.TempDir(), dsn, migration, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	restored := second.accounts[run.ID]
+	if restored == nil || restored.ExportUsage().Connections != 1 {
+		t.Fatalf("restored budget = %+v", restored)
+	}
+}
+
 func resetDatabase(t *testing.T, dsn string) {
 	t.Helper()
 	ctx := context.Background()
