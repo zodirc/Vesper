@@ -56,53 +56,72 @@ type Statement struct {
 // Judge 比较产品版本和情报区间。
 // Judge compares a product version with intelligence ranges.
 //
-// deb 和 rpm 目前没有对应的版本比较器，因此返回证据不足，不用字典序代替。KEV 不参与是否受影响的判断。
-// deb and rpm do not yet have version comparators, so the result is insufficient evidence rather than a lexicographic substitute. KEV does not participate in the affected decision.
+// generic 使用点分数字比较。deb 使用 Debian 版本比较，rpm 使用 RPM EVR 比较。版本无法按对应生态解析时返回证据不足，不用字典序代替。KEV 不参与是否受影响的判断。
+// generic uses dotted numeric comparison. deb uses Debian version comparison and rpm uses RPM EVR comparison. A version that cannot be parsed for its ecosystem returns insufficient evidence rather than a lexicographic substitute. KEV does not participate in the affected decision.
 func Judge(ecosystem, version string, statement Statement) string {
 	if statement.Ecosystem != "" && ecosystem != "" && statement.Ecosystem != ecosystem {
 		return NotAffected
 	}
-	switch ecosystem {
-	case "", "generic":
-	case "deb", "rpm":
-		return InsufficientEvidence
-	default:
-		return InsufficientEvidence
-	}
 	if version == "" || len(statement.Ranges) == 0 {
 		return InsufficientEvidence
 	}
+	comparable := false
 	for _, item := range statement.Ranges {
-		if item.Ecosystem != "" && item.Ecosystem != "generic" && item.Ecosystem != ecosystem {
+		compare, ok := comparatorFor(ecosystem, item.Ecosystem)
+		if !ok {
 			continue
 		}
-		if genericContains(version, item) {
+		contains, parsed := rangeContains(version, item, compare)
+		if !parsed {
+			return InsufficientEvidence
+		}
+		comparable = true
+		if contains {
 			return Affected
 		}
+	}
+	if !comparable {
+		return InsufficientEvidence
 	}
 	return NotAffected
 }
 
-func genericContains(version string, item Range) bool {
+func comparatorFor(product, item string) (func(string, string) (int, bool), bool) {
+	if item != "" && item != "generic" && item != product {
+		return nil, false
+	}
+	switch {
+	case item == "deb" || (item == "" && product == "deb"):
+		return compareDeb, true
+	case item == "rpm" || (item == "" && product == "rpm"):
+		return compareRPM, true
+	case product == "" || product == "generic" || item == "generic":
+		return compareGeneric, true
+	default:
+		return nil, false
+	}
+}
+
+func rangeContains(version string, item Range, compare func(string, string) (int, bool)) (bool, bool) {
 	if item.Start != "" {
-		cmp, ok := compareGeneric(version, item.Start)
+		cmp, ok := compare(version, item.Start)
 		if !ok {
-			return false
+			return false, false
 		}
 		if cmp < 0 || (cmp == 0 && !item.StartInclusive) {
-			return false
+			return false, true
 		}
 	}
 	if item.End != "" {
-		cmp, ok := compareGeneric(version, item.End)
+		cmp, ok := compare(version, item.End)
 		if !ok {
-			return false
+			return false, false
 		}
 		if cmp > 0 || (cmp == 0 && !item.EndInclusive) {
-			return false
+			return false, true
 		}
 	}
-	return true
+	return true, true
 }
 
 func compareGeneric(left, right string) (int, bool) {
