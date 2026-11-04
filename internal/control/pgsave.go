@@ -63,26 +63,66 @@ func saveNode(ctx context.Context, tx pgx.Tx, s *Service) error {
 		return err
 	}
 	now := s.now().UTC()
+	point := captureObservationPoint(s.pointID, s.worker, now)
+	point.LocationLabel = s.locationLabel
+	interfaces, err := json.Marshal(point.Interfaces)
+	if err != nil {
+		return err
+	}
+	body := snapshotBody{
+		Platform: point.Platform, Architecture: point.Architecture, Capabilities: point.Capabilities,
+		Privileges: point.Privileges, NetworkIsolation: point.NetworkIsolation, ProbeCompatibility: point.ProbeCompatibility,
+		SourceVersion: point.CapabilitySourceVersion,
+	}
+	capabilities, err := json.Marshal(body.Capabilities)
+	if err != nil {
+		return err
+	}
+	privileges, err := json.Marshal(body.Privileges)
+	if err != nil {
+		return err
+	}
+	isolation, err := json.Marshal(body.NetworkIsolation)
+	if err != nil {
+		return err
+	}
+	compatibility, err := json.Marshal(body.ProbeCompatibility)
+	if err != nil {
+		return err
+	}
 	_, err = tx.Exec(ctx, `
-INSERT INTO observation_point (id, name, node_type, node_id, platform, architecture, status, last_seen_at, created_at)
-VALUES ($1::uuid, 'local', 'local_worker', $2::uuid, $3, $4, 'active', $5, $5)
+INSERT INTO capability_snapshot (
+    id, platform, architecture, capabilities, privileges, network_isolation, probe_compatibility, captured_at, source_version
+) VALUES ($1::uuid, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9)
+ON CONFLICT (id) DO NOTHING`,
+		point.CapabilitySnapshotID.String(), point.Platform, point.Architecture, string(capabilities), string(privileges), string(isolation), string(compatibility), now, point.CapabilitySourceVersion)
+	if err != nil {
+		return fmt.Errorf("save capability snapshot: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
+INSERT INTO observation_point (
+    id, name, node_type, node_id, platform, architecture, status, last_seen_at, created_at, network_interfaces, capability_snapshot_id, location_label
+) VALUES ($1::uuid, 'local', 'local_worker', $2::uuid, $3, $4, 'active', $5, $5, $6::jsonb, $7::uuid, $8)
 ON CONFLICT (name) DO UPDATE SET
     node_id = EXCLUDED.node_id, platform = EXCLUDED.platform, architecture = EXCLUDED.architecture,
-    status = EXCLUDED.status, last_seen_at = EXCLUDED.last_seen_at`,
-		s.pointID.String(), s.worker.ID.String(), runtime.GOOS, runtime.GOARCH, now)
+    status = EXCLUDED.status, last_seen_at = EXCLUDED.last_seen_at,
+    network_interfaces = EXCLUDED.network_interfaces, capability_snapshot_id = EXCLUDED.capability_snapshot_id`,
+		s.pointID.String(), s.worker.ID.String(), runtime.GOOS, runtime.GOARCH, now, string(interfaces), point.CapabilitySnapshotID.String(), textArg(point.LocationLabel))
 	if err != nil {
 		return fmt.Errorf("save observation point: %w", err)
 	}
 	_, err = tx.Exec(ctx, `
-INSERT INTO worker (id, name, node_role, platform, architecture, version, capabilities, status, last_heartbeat_at, registered_at)
-VALUES ($1::uuid, 'local', 'local', $2, $3, 'builtin-1', $4::jsonb, 'online', $5, $5)
+INSERT INTO worker (
+    id, name, node_role, platform, architecture, version, capabilities, status, last_heartbeat_at, registered_at, capability_snapshot_id
+) VALUES ($1::uuid, 'local', 'local', $2, $3, 'builtin-1', $4::jsonb, 'online', $5, $5, $6::uuid)
 ON CONFLICT (name) DO UPDATE SET
     capabilities = EXCLUDED.capabilities,
     status = EXCLUDED.status,
     platform = EXCLUDED.platform,
     architecture = EXCLUDED.architecture,
-    last_heartbeat_at = EXCLUDED.last_heartbeat_at`,
-		s.worker.ID.String(), runtime.GOOS, runtime.GOARCH, rawCaps, now)
+    last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+    capability_snapshot_id = EXCLUDED.capability_snapshot_id`,
+		s.worker.ID.String(), runtime.GOOS, runtime.GOARCH, rawCaps, now, point.CapabilitySnapshotID.String())
 	if err != nil {
 		return fmt.Errorf("save worker: %w", err)
 	}
@@ -184,6 +224,30 @@ ON CONFLICT (id) DO UPDATE SET
 		}
 	}
 	return nil
+}
+
+func (d *pgStore) persistBudget(ctx context.Context, runID id.ID, usage scope.Usage) error {
+	return d.transact(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+UPDATE scan_run SET
+    budget_targets = GREATEST(budget_targets, $2),
+    budget_addresses = GREATEST(budget_addresses, $3),
+    budget_connections = GREATEST(budget_connections, $4),
+    budget_requests = GREATEST(budget_requests, $5),
+    budget_evidence = GREATEST(budget_evidence, $6),
+    budget_started_at = LEAST(budget_started_at, $7),
+    budget_next_allowed = GREATEST(budget_next_allowed, $8)
+WHERE id = $1::uuid`,
+			runID.String(), usage.Targets, usage.Addresses, usage.Connections, usage.Requests, usage.Evidence,
+			timeArg(nonZeroTime(usage.Started)), timeArg(nonZeroTime(usage.NextAllowed)))
+		if err != nil {
+			return fmt.Errorf("persist budget %s: %w", runID, err)
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("persist budget %s: scan run is missing", runID)
+		}
+		return nil
+	})
 }
 
 func saveTasks(ctx context.Context, tx pgx.Tx, s *Service) error {
@@ -548,14 +612,14 @@ ON CONFLICT (id) DO NOTHING`,
 		_, err := tx.Exec(ctx, `
 INSERT INTO service_hypothesis (
     id, endpoint_id, observation_point_id, assessment_run_id, service_type, product_identity_id, raw_product_name,
-    raw_version, confidence, supporting_observation_ids, contradicting_observation_ids, fingerprint_rule_ids, identity_status, fingerprint_pack_version,
+    raw_version, normalized_version, confidence, supporting_observation_ids, contradicting_observation_ids, fingerprint_rule_ids, identity_status, fingerprint_pack_version,
     evaluated_at, created_at
 ) VALUES (
-    $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6::uuid, $7, $8, $9::numeric, $10::uuid[], $11::uuid[], $12::uuid[], $13, $14, $15, $15
+    $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6::uuid, $7, $8, $9, $10::numeric, $11::uuid[], $12::uuid[], $13::uuid[], $14, $15, $16, $16
 )
 ON CONFLICT (id) DO NOTHING`,
 			item.ID.String(), item.EndpointID.String(), item.ObservationPointID.String(), item.AssessmentRunID.String(), textArg(item.ServiceType),
-			idArg(derefID(item.ProductIdentityID)), textArg(item.RawProductName), textArg(item.RawVersion), item.Confidence,
+			idArg(derefID(item.ProductIdentityID)), textArg(item.RawProductName), textArg(item.RawVersion), textArg(item.NormalizedVersion), item.Confidence,
 			uuidArray(item.SupportingObservationIDs), uuidArrayArg(item.ContradictingObservationIDs), uuidArray(item.FingerprintRuleIDs), item.IdentityStatus, item.FingerprintPackVersion, item.EvaluatedAt.UTC())
 		if err != nil {
 			return fmt.Errorf("save hypothesis %s: %w", item.ID, err)
@@ -578,9 +642,12 @@ ON CONFLICT (id) DO NOTHING`,
 		// 版本适用性判断不属于其中任何一种，因此保留 applicability，不改名充作已列出的执行器。
 		// The designed executors are nuclei, native_probe, config_engine, and fingerprint_engine.
 		// Version applicability is none of those, so the stored value stays applicability instead of being renamed into a listed executor.
-		executor := "applicability"
-		if subjectType == "asset" {
-			executor = "config_engine"
+		executor := item.Executor
+		if executor == "" {
+			executor = "applicability"
+			if subjectType == "asset" {
+				executor = "config_engine"
+			}
 		}
 		_, err := tx.Exec(ctx, `
 INSERT INTO detection_result (
@@ -593,6 +660,7 @@ ON CONFLICT (id) DO NOTHING`,
 			return fmt.Errorf("save detection %s: %w", item.ID, err)
 		}
 	}
+	s.projectFindings(s.now().UTC())
 	for _, item := range s.findings {
 		findingType := item.FindingType
 		if findingType == "" {
@@ -601,13 +669,13 @@ ON CONFLICT (id) DO NOTHING`,
 		_, err := tx.Exec(ctx, `
 INSERT INTO finding (
     id, finding_key, finding_type, asset_id, endpoint_id, product_identity_id, rule_id, external_vulnerability_id, title, severity, status,
-    first_seen_at, last_seen_at, last_occurrence_id, created_at, updated_at
-) VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6::uuid, $7::uuid, $8, $9, $10, $11, $12, $13, $14::uuid, $12, $13)
+    first_seen_at, last_seen_at, resolved_at, last_occurrence_id, created_at, updated_at
+) VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6::uuid, $7::uuid, $8, $9, $10, $11, $12, $13, $14, $15::uuid, $12, $13)
 ON CONFLICT (id) DO UPDATE SET
     status = EXCLUDED.status, severity = EXCLUDED.severity, product_identity_id = EXCLUDED.product_identity_id, rule_id = EXCLUDED.rule_id,
-    last_seen_at = EXCLUDED.last_seen_at, last_occurrence_id = EXCLUDED.last_occurrence_id, updated_at = EXCLUDED.updated_at`,
+    last_seen_at = EXCLUDED.last_seen_at, resolved_at = EXCLUDED.resolved_at, last_occurrence_id = EXCLUDED.last_occurrence_id, updated_at = EXCLUDED.updated_at`,
 			item.ID.String(), item.FindingKey, findingType, idArg(item.AssetID), idArg(item.EndpointID), idArg(item.ProductID), idArg(item.RuleID), textArg(item.VulnerabilityID), item.Title, item.Severity, item.Status,
-			item.FirstSeenAt.UTC(), item.LastSeenAt.UTC(), idArg(item.LastOccurrenceID))
+			item.FirstSeenAt.UTC(), item.LastSeenAt.UTC(), timeArg(item.ResolvedAt), idArg(item.LastOccurrenceID))
 		if err != nil {
 			return fmt.Errorf("save finding %s: %w", item.ID, err)
 		}
@@ -624,6 +692,17 @@ ON CONFLICT (id) DO NOTHING`,
 			item.ID.String(), item.FindingID.String(), item.AssessmentRunID.String(), item.DetectionID.String(), item.ObservedAt.UTC(), item.Severity, uuidArray(item.EvidenceIDs), item.ConditionDigest)
 		if err != nil {
 			return fmt.Errorf("save occurrence %s: %w", item.ID, err)
+		}
+	}
+	for _, item := range s.dispositions {
+		_, err := tx.Exec(ctx, `
+INSERT INTO disposition (
+    id, finding_id, disposition_type, reason, scope, created_by, approved_by, valid_from, valid_until, created_at
+) VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, $6::uuid, $7::uuid, $8, $9, $10)
+ON CONFLICT (id) DO NOTHING`,
+			item.ID.String(), item.FindingID.String(), item.Type, item.Reason, jsonbArg(item.Scope), idArg(item.CreatedBy), idArg(item.ApprovedBy), item.ValidFrom.UTC(), timeArg(item.ValidUntil), item.CreatedAt.UTC())
+		if err != nil {
+			return fmt.Errorf("save disposition %s: %w", item.ID, err)
 		}
 	}
 	return nil
