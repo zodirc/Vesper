@@ -41,7 +41,7 @@ func TestRedisPingIdentifiesTheProtocolWithoutAProduct(t *testing.T) {
 	}
 	var sawRedis bool
 	for _, item := range svc.Hypotheses() {
-		if item.ServiceType == "redis" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-14" {
+		if item.ServiceType == "redis" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-15" {
 			sawRedis = true
 		}
 		if item.ServiceType != "" && item.ServiceType != "redis" {

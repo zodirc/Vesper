@@ -42,7 +42,7 @@ func TestTNSPingIdentifiesTheProtocolWithoutAProduct(t *testing.T) {
 	}
 	var sawTNS bool
 	for _, item := range svc.Hypotheses() {
-		if item.ServiceType == "tns" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-14" {
+		if item.ServiceType == "tns" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-15" {
 			sawTNS = true
 		}
 		if item.ServiceType != "" && item.ServiceType != "tns" {

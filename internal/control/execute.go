@@ -16,6 +16,7 @@ import (
 	"github.com/zodirc/Vesper/internal/collect"
 	"github.com/zodirc/Vesper/internal/id"
 	"github.com/zodirc/Vesper/internal/identity"
+	"github.com/zodirc/Vesper/internal/probe/amqpprobe"
 	"github.com/zodirc/Vesper/internal/probe/arpprobe"
 	"github.com/zodirc/Vesper/internal/probe/boltprobe"
 	"github.com/zodirc/Vesper/internal/probe/clickhouseprobe"
@@ -23,18 +24,26 @@ import (
 	"github.com/zodirc/Vesper/internal/probe/ftpprobe"
 	"github.com/zodirc/Vesper/internal/probe/httpprobe"
 	"github.com/zodirc/Vesper/internal/probe/icmpprobe"
+	"github.com/zodirc/Vesper/internal/probe/imapprobe"
+	"github.com/zodirc/Vesper/internal/probe/kafkaprobe"
 	"github.com/zodirc/Vesper/internal/probe/memcachedprobe"
 	"github.com/zodirc/Vesper/internal/probe/mongoprobe"
+	"github.com/zodirc/Vesper/internal/probe/mqttprobe"
 	"github.com/zodirc/Vesper/internal/probe/mysqlprobe"
+	"github.com/zodirc/Vesper/internal/probe/natsprobe"
 	"github.com/zodirc/Vesper/internal/probe/pgprobe"
+	"github.com/zodirc/Vesper/internal/probe/pop3probe"
+	"github.com/zodirc/Vesper/internal/probe/rdpprobe"
 	"github.com/zodirc/Vesper/internal/probe/redisprobe"
 	"github.com/zodirc/Vesper/internal/probe/smtpprobe"
 	"github.com/zodirc/Vesper/internal/probe/sshprobe"
 	"github.com/zodirc/Vesper/internal/probe/tcp"
 	"github.com/zodirc/Vesper/internal/probe/tdsprobe"
+	"github.com/zodirc/Vesper/internal/probe/telnetprobe"
 	"github.com/zodirc/Vesper/internal/probe/tlsprobe"
 	"github.com/zodirc/Vesper/internal/probe/tnsprobe"
 	"github.com/zodirc/Vesper/internal/probe/udp"
+	"github.com/zodirc/Vesper/internal/probe/vncprobe"
 	"github.com/zodirc/Vesper/internal/rule"
 	"github.com/zodirc/Vesper/internal/scope"
 	"github.com/zodirc/Vesper/internal/task"
@@ -64,8 +73,14 @@ type collectInput struct {
 //
 // 过期、领取、启动和结果提交都在同一个数据库事务里锁定任务行后更新。网络收发发生在事务之外。
 // Expiry, claim, start, and result submission each lock the task rows and update them in one database transaction. Network transfer happens outside the transaction.
+//
+// 领取前先处理到期的周期。周期创建运行使用单独的事务，不在请求路径里拨号。
+// Due schedules are handled before the claim. Creating a scheduled run uses its own transaction and does not dial on the request path.
 func (s *Service) ExecuteAvailable(ctx context.Context) (bool, error) {
 	if err := s.resumePlanning(ctx); err != nil {
+		return false, err
+	}
+	if err := s.fireDueSchedules(ctx); err != nil {
 		return false, err
 	}
 	s.mu.Lock()
@@ -273,7 +288,7 @@ func operationForUnit(unitType string) string {
 		return scope.OpDiscovery
 	case "port_scan":
 		return scope.OpConnect
-	case "protocol_probe", "udp_probe":
+	case "protocol_probe", "udp_probe", "zgrab2":
 		return scope.OpProtocolProbe
 	case "host_collect":
 		return scope.OpConfigCheck
@@ -364,6 +379,8 @@ func (s *Service) executeLease(ctx context.Context, lease task.Lease, account *s
 		return s.executeCollect(ctx, lease)
 	case "active_detection":
 		return s.executeActive(ctx, lease, account)
+	case "zgrab2":
+		return s.executeZGrab(ctx, lease, account)
 	default:
 		return &probesdk.Error{Class: probesdk.ClassUnsupported, Message: "unit type " + lease.UnitType}
 	}
@@ -455,6 +472,36 @@ func (s *Service) executePorts(ctx context.Context, lease task.Lease, account *s
 			if clickHouseProbeForPort(result.Port) == clickhouseprobe.Name {
 				probes = append(probes, clickhouseprobe.Name)
 			}
+			if telnetProbeForPort(result.Port) == telnetprobe.Name {
+				probes = append(probes, telnetprobe.Name)
+			}
+			if pop3ProbeForPort(result.Port) == pop3probe.Name {
+				probes = append(probes, pop3probe.Name)
+			}
+			if imapProbeForPort(result.Port) == imapprobe.Name {
+				probes = append(probes, imapprobe.Name)
+			}
+			if vncProbeForPort(result.Port) == vncprobe.Name {
+				probes = append(probes, vncprobe.Name)
+			}
+			if natsProbeForPort(result.Port) == natsprobe.Name {
+				probes = append(probes, natsprobe.Name)
+			}
+			if rdpProbeForPort(result.Port) == rdpprobe.Name {
+				probes = append(probes, rdpprobe.Name)
+			}
+			if amqpProbeForPort(result.Port) == amqpprobe.Name {
+				probes = append(probes, amqpprobe.Name)
+			}
+			if mqttProbeForPort(result.Port) == mqttprobe.Name {
+				probes = append(probes, mqttprobe.Name)
+			}
+			if kafkaProbeForPort(result.Port) == kafkaprobe.Name {
+				probes = append(probes, kafkaprobe.Name)
+			}
+			if err := s.scheduleZGrab(lease, addr, result.Port, input.Hostname); err != nil {
+				return err
+			}
 			for _, probe := range probes {
 				item := probeInput{Address: addr.String(), Port: result.Port, Probe: probe, Hostname: input.Hostname}
 				if probe == smtpprobe.Name {
@@ -478,8 +525,8 @@ func (s *Service) executePorts(ctx context.Context, lease task.Lease, account *s
 	})
 }
 
-// udpProbeForPort 选择 UDP 探针。生产实现只在端口 53 选择 DNS。本包测试可以替换它，把 DNS 指到临时端口。
-// udpProbeForPort selects a UDP probe. The production implementation selects DNS only for port 53. Tests in this package may replace it to point DNS at an ephemeral port.
+// udpProbeForPort 选择 UDP 探针。生产实现在端口 53 选择 DNS，在端口 123 选择 NTP。本包测试可以替换它，把探针指到临时端口。
+// udpProbeForPort selects a UDP probe. The production implementation selects DNS for port 53 and NTP for port 123. Tests in this package may replace it to point a probe at an ephemeral port.
 var udpProbeForPort = udp.ProbeForPort
 
 // ftpProbeForPort 选择 FTP 探针。生产实现只在端口 21 选择 FTP。本包测试可以替换它，把 FTP 指到临时端口。
@@ -529,6 +576,42 @@ var memcachedProbeForPort = memcachedprobe.ProbeForPort
 // clickHouseProbeForPort 选择 ClickHouse 探针。生产实现只在端口 9000 选择 ClickHouse。本包测试可以替换它，把 ClickHouse 指到临时端口。
 // clickHouseProbeForPort selects the ClickHouse probe. The production implementation selects ClickHouse only for port 9000. Tests in this package may replace it to point ClickHouse at an ephemeral port.
 var clickHouseProbeForPort = clickhouseprobe.ProbeForPort
+
+// telnetProbeForPort 选择 Telnet 探针。生产实现只在端口 23 选择 Telnet。本包测试可以替换它，把 Telnet 指到临时端口。
+// telnetProbeForPort selects the Telnet probe. The production implementation selects Telnet only for port 23. Tests in this package may replace it to point Telnet at an ephemeral port.
+var telnetProbeForPort = telnetprobe.ProbeForPort
+
+// pop3ProbeForPort 选择 POP3 探针。生产实现只在端口 110 选择 POP3。本包测试可以替换它，把 POP3 指到临时端口。
+// pop3ProbeForPort selects the POP3 probe. The production implementation selects POP3 only for port 110. Tests in this package may replace it to point POP3 at an ephemeral port.
+var pop3ProbeForPort = pop3probe.ProbeForPort
+
+// imapProbeForPort 选择 IMAP 探针。生产实现只在端口 143 选择 IMAP。本包测试可以替换它，把 IMAP 指到临时端口。
+// imapProbeForPort selects the IMAP probe. The production implementation selects IMAP only for port 143. Tests in this package may replace it to point IMAP at an ephemeral port.
+var imapProbeForPort = imapprobe.ProbeForPort
+
+// vncProbeForPort 选择 VNC 探针。生产实现只在端口 5900 选择 VNC。本包测试可以替换它，把 VNC 指到临时端口。
+// vncProbeForPort selects the VNC probe. The production implementation selects VNC only for port 5900. Tests in this package may replace it to point VNC at an ephemeral port.
+var vncProbeForPort = vncprobe.ProbeForPort
+
+// natsProbeForPort 选择 NATS 探针。生产实现只在端口 4222 选择 NATS。本包测试可以替换它，把 NATS 指到临时端口。
+// natsProbeForPort selects the NATS probe. The production implementation selects NATS only for port 4222. Tests in this package may replace it to point NATS at an ephemeral port.
+var natsProbeForPort = natsprobe.ProbeForPort
+
+// rdpProbeForPort 选择 RDP 探针。生产实现只在端口 3389 选择 RDP。本包测试可以替换它，把 RDP 指到临时端口。
+// rdpProbeForPort selects the RDP probe. The production implementation selects RDP only for port 3389. Tests in this package may replace it to point RDP at an ephemeral port.
+var rdpProbeForPort = rdpprobe.ProbeForPort
+
+// amqpProbeForPort 选择 AMQP 探针。生产实现只在端口 5672 选择 AMQP。本包测试可以替换它，把 AMQP 指到临时端口。
+// amqpProbeForPort selects the AMQP probe. The production implementation selects AMQP only for port 5672. Tests in this package may replace it to point AMQP at an ephemeral port.
+var amqpProbeForPort = amqpprobe.ProbeForPort
+
+// mqttProbeForPort 选择 MQTT 探针。生产实现只在端口 1883 选择 MQTT。本包测试可以替换它，把 MQTT 指到临时端口。
+// mqttProbeForPort selects the MQTT probe. The production implementation selects MQTT only for port 1883. Tests in this package may replace it to point MQTT at an ephemeral port.
+var mqttProbeForPort = mqttprobe.ProbeForPort
+
+// kafkaProbeForPort 选择 Kafka 探针。生产实现只在端口 9092 选择 Kafka。本包测试可以替换它，把 Kafka 指到临时端口。
+// kafkaProbeForPort selects the Kafka probe. The production implementation selects Kafka only for port 9092. Tests in this package may replace it to point Kafka at an ephemeral port.
+var kafkaProbeForPort = kafkaprobe.ProbeForPort
 
 func (s *Service) executeUDP(ctx context.Context, lease task.Lease, account *scope.Account) error {
 	var input addressInput
@@ -630,8 +713,14 @@ func (s *Service) recordUDP(lease task.Lease, addr netip.Addr, hostname string, 
 		value["connected_address"] = addr.String()
 		value["request_rounds"] = result.Rounds
 		value["response_bytes"] = len(result.Response)
-		value["qname"] = result.QName
-		value["qtype"] = dnsQTypeName(result.QType)
+		if result.Probe == udp.DNSName {
+			value["qname"] = result.QName
+			value["qtype"] = dnsQTypeName(result.QType)
+		}
+		if result.Probe == udp.NTPName && result.Outcome.State == "open" && len(result.Response) >= udp.NTPPacketBytes {
+			value["ntp_version"] = int((result.Response[0] >> 3) & 7)
+			value["stratum"] = int(result.Response[1])
+		}
 	}
 	if result.Outcome.Message != "" {
 		value["message"] = result.Outcome.Message
@@ -893,6 +982,119 @@ func (s *Service) executeProbe(ctx context.Context, lease task.Lease, account *s
 			state = "error"
 		}
 		return s.finishProbe(ctx, lease, addr, input.Port, input.Hostname, clickhouseprobe.Name, value, result.Raw, state, probeErr)
+	case telnetprobe.Name:
+		result, probeErr := telnetprobe.Probe(ctx, dial, account, addr, input.Port, s.now)
+		value := map[string]any{}
+		state := result.State
+		if result.IsTelnet {
+			value["protocol"] = telnetprobe.Name
+			if result.Banner != "" {
+				value["banner"] = result.Banner
+			}
+		} else if state == "open" {
+			state = "error"
+		}
+		return s.finishProbe(ctx, lease, addr, input.Port, input.Hostname, telnetprobe.Name, value, result.Raw, state, probeErr)
+	case pop3probe.Name:
+		result, probeErr := pop3probe.Probe(ctx, dial, account, addr, input.Port, s.now)
+		value := map[string]any{}
+		state := result.State
+		if result.IsPOP3 {
+			value["protocol"] = pop3probe.Name
+			value["reply"] = result.Reply
+			value["reply_code"] = result.ReplyCode
+		} else if state == "open" {
+			state = "error"
+		}
+		return s.finishProbe(ctx, lease, addr, input.Port, input.Hostname, pop3probe.Name, value, result.Raw, state, probeErr)
+	case imapprobe.Name:
+		result, probeErr := imapprobe.Probe(ctx, dial, account, addr, input.Port, s.now)
+		value := map[string]any{}
+		state := result.State
+		if result.IsIMAP {
+			value["protocol"] = imapprobe.Name
+			value["reply"] = result.Reply
+			value["status"] = result.Status
+		} else if state == "open" {
+			state = "error"
+		}
+		return s.finishProbe(ctx, lease, addr, input.Port, input.Hostname, imapprobe.Name, value, result.Raw, state, probeErr)
+	case vncprobe.Name:
+		result, probeErr := vncprobe.Probe(ctx, dial, account, addr, input.Port, s.now)
+		value := map[string]any{}
+		state := result.State
+		if result.IsVNC {
+			value["protocol"] = vncprobe.Name
+			value["protocol_version"] = result.ProtocolVersion
+		} else if state == "open" {
+			state = "error"
+		}
+		return s.finishProbe(ctx, lease, addr, input.Port, input.Hostname, vncprobe.Name, value, result.Raw, state, probeErr)
+	case natsprobe.Name:
+		result, probeErr := natsprobe.Probe(ctx, dial, account, addr, input.Port, s.now)
+		value := map[string]any{}
+		state := result.State
+		if result.IsNATS {
+			value["protocol"] = natsprobe.Name
+			if result.ServerVersion != "" {
+				value["server_version"] = result.ServerVersion
+			}
+		} else if state == "open" {
+			state = "error"
+		}
+		return s.finishProbe(ctx, lease, addr, input.Port, input.Hostname, natsprobe.Name, value, result.Raw, state, probeErr)
+	case rdpprobe.Name:
+		result, probeErr := rdpprobe.Probe(ctx, dial, account, addr, input.Port, s.now)
+		value := map[string]any{}
+		state := result.State
+		if result.IsRDP {
+			value["protocol"] = rdpprobe.Name
+			if result.Negotiation != "" {
+				value["negotiation"] = result.Negotiation
+			}
+			if result.Negotiation == "response" {
+				value["selected_protocol"] = result.SelectedProtocol
+			}
+			if result.Negotiation == "failure" {
+				value["failure_code"] = result.FailureCode
+			}
+		} else if state == "open" {
+			state = "error"
+		}
+		return s.finishProbe(ctx, lease, addr, input.Port, input.Hostname, rdpprobe.Name, value, result.Raw, state, probeErr)
+	case amqpprobe.Name:
+		result, probeErr := amqpprobe.Probe(ctx, dial, account, addr, input.Port, s.now)
+		value := map[string]any{}
+		state := result.State
+		if result.IsAMQP {
+			value["protocol"] = amqpprobe.Name
+			value["reply"] = result.Reply
+		} else if state == "open" {
+			state = "error"
+		}
+		return s.finishProbe(ctx, lease, addr, input.Port, input.Hostname, amqpprobe.Name, value, result.Raw, state, probeErr)
+	case mqttprobe.Name:
+		result, probeErr := mqttprobe.Probe(ctx, dial, account, addr, input.Port, s.now)
+		value := map[string]any{}
+		state := result.State
+		if result.IsMQTT {
+			value["protocol"] = mqttprobe.Name
+			value["ack_code"] = result.AckCode
+		} else if state == "open" {
+			state = "error"
+		}
+		return s.finishProbe(ctx, lease, addr, input.Port, input.Hostname, mqttprobe.Name, value, result.Raw, state, probeErr)
+	case kafkaprobe.Name:
+		result, probeErr := kafkaprobe.Probe(ctx, dial, account, addr, input.Port, s.now)
+		value := map[string]any{}
+		state := result.State
+		if result.IsKafka {
+			value["protocol"] = kafkaprobe.Name
+			value["error_code"] = result.ErrorCode
+		} else if state == "open" {
+			state = "error"
+		}
+		return s.finishProbe(ctx, lease, addr, input.Port, input.Hostname, kafkaprobe.Name, value, result.Raw, state, probeErr)
 	default:
 		return &probesdk.Error{Class: probesdk.ClassUnsupported, Message: "probe " + input.Probe}
 	}
@@ -1022,6 +1224,9 @@ func (s *Service) executeCollect(ctx context.Context, lease task.Lease) error {
 				return err
 			}
 		}
+	}
+	if err := s.judgeCollectedPackages(lease); err != nil {
+		return err
 	}
 	return s.flush(ctx)
 }
@@ -1226,8 +1431,8 @@ func (s *Service) verifiedEvidence(observationIDs []id.ID) []id.ID {
 	return out
 }
 
-// mergeFinding 合并同对象上的同一风险。severity 为空时保持空白，不用固定等级代替缺失的情报严重性。
-// mergeFinding merges the same risk on one object. An empty severity stays empty and does not substitute a fixed level for missing intelligence severity.
+// mergeFinding 合并同对象上的同一风险。新的确认带有严重性时，更新 Finding 的当前严重性；发生记录保留当时的严重性。空严重性不覆盖已有等级，也不用固定等级代替缺失的情报严重性。
+// mergeFinding merges the same risk on one object. A new confirmation with a severity updates the Finding's current severity; the occurrence keeps the severity from that time. An empty severity does not clear an existing level and does not substitute a fixed level for missing intelligence severity.
 func (s *Service) mergeFinding(endpointID, assetID id.ID, vulnerabilityID string, detectionID, assessmentRunID id.ID, version, findingType, severity string, evidenceIDs []id.ID, ruleID, productID id.ID) {
 	subject := endpointID
 	if subject.IsZero() {
@@ -1245,7 +1450,7 @@ func (s *Service) mergeFinding(endpointID, assetID id.ID, vulnerabilityID string
 		s.findings[key] = finding
 	} else {
 		finding.LastSeenAt = now
-		if finding.Severity == "" {
+		if severity != "" {
 			finding.Severity = severity
 		}
 		if finding.RuleID.IsZero() {
@@ -1583,11 +1788,11 @@ func evidenceContent(protocol string) (string, string) {
 		return "application/http", "identity"
 	case "tls":
 		return "application/pkix-cert", "identity"
-	case "ssh", "ftp", "smtp":
+	case "ssh", "ftp", "smtp", "telnet", "pop3", "imap", "vnc", "nats":
 		return "text/plain", "identity"
 	case "dns":
 		return "application/dns-message", "identity"
-	case "mysql", "postgresql", "mongodb", "tds", "tns", "cql", "bolt", "clickhouse":
+	case "mysql", "postgresql", "mongodb", "tds", "tns", "cql", "bolt", "clickhouse", "rdp", "amqp", "mqtt", "kafka", "ntp":
 		return "application/octet-stream", "identity"
 	case "redis", "memcached":
 		return "text/plain", "identity"
@@ -1660,6 +1865,10 @@ func mapApplicability(value string) string {
 		return "confirmed"
 	case assess.NotAffected:
 		return "not_vulnerable"
+	case assess.NotApplicable:
+		return "not_applicable"
+	case assess.Conflict:
+		return "conflict"
 	case assess.InsufficientEvidence:
 		return "insufficient_evidence"
 	default:

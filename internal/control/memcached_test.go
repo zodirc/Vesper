@@ -41,7 +41,7 @@ func TestMemcachedVersionIdentifiesTheProtocolWithoutAProduct(t *testing.T) {
 	}
 	var sawMemcached bool
 	for _, item := range svc.Hypotheses() {
-		if item.ServiceType == "memcached" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-14" {
+		if item.ServiceType == "memcached" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-15" {
 			sawMemcached = true
 		}
 		if item.ServiceType != "" && item.ServiceType != "memcached" {

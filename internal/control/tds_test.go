@@ -42,7 +42,7 @@ func TestTDSPreloginIdentifiesTheProtocolWithoutAProduct(t *testing.T) {
 	}
 	var sawTDS bool
 	for _, item := range svc.Hypotheses() {
-		if item.ServiceType == "tds" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-14" {
+		if item.ServiceType == "tds" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-15" {
 			sawTDS = true
 		}
 		if item.ServiceType != "" && item.ServiceType != "tds" {

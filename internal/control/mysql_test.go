@@ -42,7 +42,7 @@ func TestMySQLHandshakeIdentifiesTheProtocolWithoutAProduct(t *testing.T) {
 	}
 	var sawMySQL bool
 	for _, item := range svc.Hypotheses() {
-		if item.ServiceType == "mysql" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-14" {
+		if item.ServiceType == "mysql" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-15" {
 			sawMySQL = true
 		}
 		if item.ServiceType != "" && item.ServiceType != "mysql" {

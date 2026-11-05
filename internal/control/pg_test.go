@@ -42,7 +42,7 @@ func TestPostgreSQLStartupIdentifiesTheProtocolWithoutAProduct(t *testing.T) {
 	}
 	var sawPostgreSQL bool
 	for _, item := range svc.Hypotheses() {
-		if item.ServiceType == "postgresql" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-14" {
+		if item.ServiceType == "postgresql" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-15" {
 			sawPostgreSQL = true
 		}
 		if item.ServiceType != "" && item.ServiceType != "postgresql" {

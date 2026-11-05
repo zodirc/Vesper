@@ -41,7 +41,7 @@ func TestClickHouseHelloIdentifiesTheProtocolWithoutAProduct(t *testing.T) {
 	}
 	var sawClickHouse bool
 	for _, item := range svc.Hypotheses() {
-		if item.ServiceType == "clickhouse" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-14" {
+		if item.ServiceType == "clickhouse" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-15" {
 			sawClickHouse = true
 		}
 		if item.ServiceType != "" && item.ServiceType != "clickhouse" {

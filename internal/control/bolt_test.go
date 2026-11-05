@@ -41,7 +41,7 @@ func TestBoltHandshakeIdentifiesTheProtocolWithoutAProduct(t *testing.T) {
 	}
 	var sawBolt bool
 	for _, item := range svc.Hypotheses() {
-		if item.ServiceType == "bolt" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-14" {
+		if item.ServiceType == "bolt" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-15" {
 			sawBolt = true
 		}
 		if item.ServiceType != "" && item.ServiceType != "bolt" {

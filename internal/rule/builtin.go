@@ -9,7 +9,10 @@ import (
 const (
 	// FingerprintVersion 是新扫描使用的内置指纹包版本。
 	// FingerprintVersion is the built-in fingerprint pack version used by new scans.
-	FingerprintVersion = "builtin-14"
+	FingerprintVersion = "builtin-15"
+	// ClickHouseFingerprintVersion 是加入 ClickHouse 规则时发布的指纹包。内容保持不变，其中没有 Telnet、POP3、IMAP、VNC、NATS、RDP、AMQP、MQTT、Kafka 和 NTP 规则。
+	// ClickHouseFingerprintVersion is the fingerprint pack published when the ClickHouse rule was added. Its content stays unchanged and it has no Telnet, POP3, IMAP, VNC, NATS, RDP, AMQP, MQTT, Kafka, or NTP rule.
+	ClickHouseFingerprintVersion = "builtin-14"
 	// MemcachedFingerprintVersion 是加入 Memcached 规则时发布的指纹包。内容保持不变，其中没有 ClickHouse 规则。
 	// MemcachedFingerprintVersion is the fingerprint pack published when the Memcached rule was added. Its content stays unchanged and it has no ClickHouse rule.
 	MemcachedFingerprintVersion = "builtin-13"
@@ -57,64 +60,64 @@ const (
 // Builtin 返回已发布的内置指纹包和配置包。
 // Builtin returns the published built-in fingerprint and configuration packs.
 //
-// builtin-1 到 builtin-13 仍可按版本读取，内容不改。新扫描写入 builtin-14。builtin-14 在 builtin-13 的规则之外增加 ClickHouse。
-// ClickHouse 规则只确认线协议，不提取产品。带版本的规则标识避免与已发布规则的主键冲突。
-// builtin-1 through builtin-13 remain readable by version and their content is unchanged. New scans record builtin-14. builtin-14 adds ClickHouse beside the builtin-13 rules.
-// The ClickHouse rule confirms the wire protocol and does not extract a product. Versioned rule identifiers avoid collisions with primary keys of already published rules.
+// builtin-1 到 builtin-14 仍可按版本读取，内容不改。新扫描写入 builtin-15。builtin-15 在 builtin-14 的规则之外增加 Telnet、POP3、IMAP、VNC、NATS、RDP、AMQP、MQTT、Kafka 和 NTP。
+// 这些规则只确认线协议，不提取产品。带版本的规则标识避免与已发布规则的主键冲突。
+// builtin-1 through builtin-14 remain readable by version and their content is unchanged. New scans record builtin-15. builtin-15 adds Telnet, POP3, IMAP, VNC, NATS, RDP, AMQP, MQTT, Kafka, and NTP beside the builtin-14 rules.
+// These rules confirm the wire protocol and do not extract a product. Versioned rule identifiers avoid collisions with primary keys of already published rules.
 func Builtin(now time.Time) ([]Pack, error) {
-	previous, err := sealFingerprints(PreviousFingerprintVersion, false, false, false, false, false, false, false, false, false, false, false, false, false, now)
+	previous, err := sealFingerprints(PreviousFingerprintVersion, false, false, false, false, false, false, false, false, false, false, false, false, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	dns, err := sealFingerprints(DNSFingerprintVersion, true, false, false, false, false, false, false, false, false, false, false, false, false, now)
+	dns, err := sealFingerprints(DNSFingerprintVersion, true, false, false, false, false, false, false, false, false, false, false, false, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	ftp, err := sealFingerprints(FTPFingerprintVersion, true, true, false, false, false, false, false, false, false, false, false, false, false, now)
+	ftp, err := sealFingerprints(FTPFingerprintVersion, true, true, false, false, false, false, false, false, false, false, false, false, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	smtp, err := sealFingerprints(SMTPFingerprintVersion, true, true, true, false, false, false, false, false, false, false, false, false, false, now)
+	smtp, err := sealFingerprints(SMTPFingerprintVersion, true, true, true, false, false, false, false, false, false, false, false, false, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	mysql, err := sealFingerprints(MySQLFingerprintVersion, true, true, true, true, false, false, false, false, false, false, false, false, false, now)
+	mysql, err := sealFingerprints(MySQLFingerprintVersion, true, true, true, true, false, false, false, false, false, false, false, false, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	postgresql, err := sealFingerprints(PostgreSQLFingerprintVersion, true, true, true, true, true, false, false, false, false, false, false, false, false, now)
+	postgresql, err := sealFingerprints(PostgreSQLFingerprintVersion, true, true, true, true, true, false, false, false, false, false, false, false, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	redisPack, err := sealFingerprints(RedisFingerprintVersion, true, true, true, true, true, true, false, false, false, false, false, false, false, now)
+	redisPack, err := sealFingerprints(RedisFingerprintVersion, true, true, true, true, true, true, false, false, false, false, false, false, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	mongoPack, err := sealFingerprints(MongoDBFingerprintVersion, true, true, true, true, true, true, true, false, false, false, false, false, false, now)
+	mongoPack, err := sealFingerprints(MongoDBFingerprintVersion, true, true, true, true, true, true, true, false, false, false, false, false, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	tdsPack, err := sealFingerprints(TDSFingerprintVersion, true, true, true, true, true, true, true, true, false, false, false, false, false, now)
+	tdsPack, err := sealFingerprints(TDSFingerprintVersion, true, true, true, true, true, true, true, true, false, false, false, false, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	tnsPack, err := sealFingerprints(TNSFingerprintVersion, true, true, true, true, true, true, true, true, true, false, false, false, false, now)
+	tnsPack, err := sealFingerprints(TNSFingerprintVersion, true, true, true, true, true, true, true, true, true, false, false, false, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	cqlPack, err := sealFingerprints(CQLFingerprintVersion, true, true, true, true, true, true, true, true, true, true, false, false, false, now)
+	cqlPack, err := sealFingerprints(CQLFingerprintVersion, true, true, true, true, true, true, true, true, true, true, false, false, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	boltPack, err := sealFingerprints(BoltFingerprintVersion, true, true, true, true, true, true, true, true, true, true, true, false, false, now)
+	boltPack, err := sealFingerprints(BoltFingerprintVersion, true, true, true, true, true, true, true, true, true, true, true, false, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	memcachedPack, err := sealFingerprints(MemcachedFingerprintVersion, true, true, true, true, true, true, true, true, true, true, true, true, false, now)
+	memcachedPack, err := sealFingerprints(MemcachedFingerprintVersion, true, true, true, true, true, true, true, true, true, true, true, true, false, false, now)
 	if err != nil {
 		return nil, err
 	}
-	current, err := sealFingerprints(FingerprintVersion, true, true, true, true, true, true, true, true, true, true, true, true, true, now)
+	clickhousePack, err := sealFingerprints(ClickHouseFingerprintVersion, true, true, true, true, true, true, true, true, true, true, true, true, true, false, now)
 	if err != nil {
 		return nil, err
 	}
@@ -130,10 +133,14 @@ func Builtin(now time.Time) ([]Pack, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []Pack{previous, dns, ftp, smtp, mysql, postgresql, redisPack, mongoPack, tdsPack, tnsPack, cqlPack, boltPack, memcachedPack, current, config}, nil
+	current, err := sealFingerprints(FingerprintVersion, true, true, true, true, true, true, true, true, true, true, true, true, true, true, now)
+	if err != nil {
+		return nil, err
+	}
+	return []Pack{previous, dns, ftp, smtp, mysql, postgresql, redisPack, mongoPack, tdsPack, tnsPack, cqlPack, boltPack, memcachedPack, clickhousePack, current, config}, nil
 }
 
-func sealFingerprints(version string, includeDNS, includeFTP, includeSMTP, includeMySQL, includePostgreSQL, includeRedis, includeMongoDB, includeTDS, includeTNS, includeCQL, includeBolt, includeMemcached, includeClickHouse bool, now time.Time) (Pack, error) {
+func sealFingerprints(version string, includeDNS, includeFTP, includeSMTP, includeMySQL, includePostgreSQL, includeRedis, includeMongoDB, includeTDS, includeTNS, includeCQL, includeBolt, includeMemcached, includeClickHouse, includeServices bool, now time.Time) (Pack, error) {
 	identifier := func(key string) id.ID {
 		if includeFTP || includeSMTP || includeMySQL || includePostgreSQL || includeRedis || includeMongoDB || includeTDS || includeTNS || includeCQL || includeBolt || includeMemcached || includeClickHouse {
 			return StableID("fingerprint:" + version + ":" + key)
@@ -268,6 +275,16 @@ func sealFingerprints(version string, includeDNS, includeFTP, includeSMTP, inclu
 			Conditions:        []Condition{{Field: "protocol", Op: "equals", Value: "clickhouse"}},
 			ConfidenceMatched: "0.7000", ConfidenceEmpty: "0.7000",
 		})
+	}
+	if includeServices {
+		for _, key := range []string{"telnet", "pop3", "imap", "vnc", "nats", "rdp", "amqp", "mqtt", "kafka", "ntp"} {
+			rules = append(rules, FingerprintRule{
+				ID: identifier(key), Key: key, Version: version, Priority: 10,
+				TargetProtocol: key, ServiceType: key,
+				Conditions:        []Condition{{Field: "protocol", Op: "equals", Value: key}},
+				ConfidenceMatched: "0.7000", ConfidenceEmpty: "0.7000",
+			})
+		}
 	}
 	return Seal(Pack{
 		ID: StableID("pack:fingerprint:" + version), Type: "fingerprint", Version: version,

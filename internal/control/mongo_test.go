@@ -42,7 +42,7 @@ func TestMongoDBPingIdentifiesTheProtocolWithoutAProduct(t *testing.T) {
 	}
 	var sawMongoDB bool
 	for _, item := range svc.Hypotheses() {
-		if item.ServiceType == "mongodb" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-14" {
+		if item.ServiceType == "mongodb" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-15" {
 			sawMongoDB = true
 		}
 		if item.ServiceType != "" && item.ServiceType != "mongodb" {

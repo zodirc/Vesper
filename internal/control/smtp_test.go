@@ -50,7 +50,7 @@ func TestSMTPGreetingIdentifiesTheServiceWithoutAProduct(t *testing.T) {
 	}
 	var sawSMTP bool
 	for _, item := range svc.Hypotheses() {
-		if item.ServiceType == "smtp" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-14" {
+		if item.ServiceType == "smtp" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-15" {
 			sawSMTP = true
 		}
 		if item.ServiceType != "" && item.ServiceType != "smtp" {

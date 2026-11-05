@@ -131,14 +131,29 @@ func TestDNSFingerprintConfirmsProtocolWithoutProduct(t *testing.T) {
 	if clickhouse := MatchFingerprints(memcachedPack, Fact{Type: "protocol_response", Value: map[string]any{"protocol": "clickhouse", "port": "9000"}}); len(clickhouse) != 0 {
 		t.Fatalf("builtin-13 clickhouse hits = %+v", clickhouse)
 	}
+	if FingerprintVersion != "builtin-15" || ClickHouseFingerprintVersion != "builtin-14" {
+		t.Fatalf("fingerprint versions = %s %s", FingerprintVersion, ClickHouseFingerprintVersion)
+	}
+	sealed := Fingerprints(packs, ClickHouseFingerprintVersion)
+	if telnet := MatchFingerprints(sealed, Fact{Type: "protocol_response", Value: map[string]any{"protocol": "telnet", "port": "23"}}); len(telnet) != 0 {
+		t.Fatalf("builtin-14 telnet hits = %+v", telnet)
+	}
 	current := Fingerprints(packs, FingerprintVersion)
 	hits = MatchFingerprints(current, Fact{Type: "protocol_response", Value: map[string]any{"protocol": "dns", "port": "53"}})
 	if len(hits) != 1 || hits[0].ServiceType != "dns" || hits[0].Product != "" {
-		t.Fatalf("builtin-14 dns hits = %+v", hits)
+		t.Fatalf("current dns hits = %+v", hits)
 	}
 	clickhouse := MatchFingerprints(current, Fact{Type: "protocol_response", Value: map[string]any{"protocol": "clickhouse", "reply": "HELLO", "port": "9000"}})
 	if len(clickhouse) != 1 || clickhouse[0].ServiceType != "clickhouse" || clickhouse[0].Product != "" || clickhouse[0].Version != "" || clickhouse[0].Status != "unknown" {
 		t.Fatalf("clickhouse hits = %+v", clickhouse)
+	}
+	telnet := MatchFingerprints(current, Fact{Type: "protocol_response", Value: map[string]any{"protocol": "telnet", "banner": "login:", "port": "23"}})
+	if len(telnet) != 1 || telnet[0].ServiceType != "telnet" || telnet[0].Product != "" || telnet[0].Version != "" || telnet[0].Status != "unknown" {
+		t.Fatalf("telnet hits = %+v", telnet)
+	}
+	ntp := MatchFingerprints(current, Fact{Type: "protocol_response", Value: map[string]any{"protocol": "ntp", "port": "123"}})
+	if len(ntp) != 1 || ntp[0].ServiceType != "ntp" || ntp[0].Product != "" || ntp[0].Version != "" || ntp[0].Status != "unknown" {
+		t.Fatalf("ntp hits = %+v", ntp)
 	}
 	if invented := MatchFingerprints(current, Fact{Type: "protocol_response", Value: map[string]any{"port": "9000", "reply": "HELLO"}}); len(invented) != 0 {
 		t.Fatalf("port hits = %+v", invented)

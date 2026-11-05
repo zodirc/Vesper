@@ -42,7 +42,7 @@ func TestCQLStartupIdentifiesTheProtocolWithoutAProduct(t *testing.T) {
 	}
 	var sawCQL bool
 	for _, item := range svc.Hypotheses() {
-		if item.ServiceType == "cql" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-14" {
+		if item.ServiceType == "cql" && item.RawProductName == "" && item.RawVersion == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-15" {
 			sawCQL = true
 		}
 		if item.ServiceType != "" && item.ServiceType != "cql" {
