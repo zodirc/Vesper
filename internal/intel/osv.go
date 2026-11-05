@@ -38,6 +38,7 @@ func parseOSVRecord(raw json.RawMessage) ([]Record, error) {
 		ID            string `json:"id"`
 		Published     string `json:"published"`
 		Modified      string `json:"modified"`
+		Withdrawn     string `json:"withdrawn"`
 		Aliases       []string
 		Severity      []struct {
 			Type  string `json:"type"`
@@ -57,6 +58,7 @@ func parseOSVRecord(raw json.RawMessage) ([]Record, error) {
 					Limit        string `json:"limit"`
 				} `json:"events"`
 			} `json:"ranges"`
+			Versions []string `json:"versions"`
 		} `json:"affected"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
@@ -76,6 +78,10 @@ func parseOSVRecord(raw json.RawMessage) ([]Record, error) {
 	if err != nil {
 		return nil, err
 	}
+	withdrawn, err := parseTime(body.Withdrawn)
+	if err != nil {
+		return nil, err
+	}
 	severity, severityData, err := osvSeverity(body.Severity)
 	if err != nil {
 		return nil, fmt.Errorf("osv %s: %w", body.ID, err)
@@ -88,7 +94,13 @@ func parseOSVRecord(raw json.RawMessage) ([]Record, error) {
 		}
 	}
 	if len(body.Affected) == 0 {
-		return nil, fmt.Errorf("osv %s has no affected package", body.ID)
+		if withdrawn == nil {
+			return nil, fmt.Errorf("osv %s has no affected package", body.ID)
+		}
+		return []Record{{
+			SourceRecordID: body.ID, VulnerabilityID: vulnerabilityID, SeverityData: severityData, Severity: severity,
+			PublishedAt: published, ModifiedAt: modified, Raw: append([]byte(nil), raw...), WithdrawsPrior: true,
+		}}, nil
 	}
 	var out []Record
 	for _, affected := range body.Affected {
@@ -97,23 +109,41 @@ func parseOSVRecord(raw json.RawMessage) ([]Record, error) {
 		if ecosystem == "" || name == "" {
 			return nil, fmt.Errorf("osv %s has an affected package without ecosystem or name", body.ID)
 		}
-		ranges, fixed, err := osvRanges(affected.Ranges, storedEcosystem(ecosystem))
+		scheme, platform := classifyOSVEcosystem(ecosystem, name)
+		ranges, fixed, err := osvRanges(affected.Ranges, scheme)
 		if err != nil {
 			return nil, fmt.Errorf("osv %s %s:%s: %w", body.ID, ecosystem, name, err)
 		}
+		for _, version := range affected.Versions {
+			version = strings.TrimSpace(version)
+			if version == "" {
+				return nil, fmt.Errorf("osv %s %s:%s has an empty version", body.ID, ecosystem, name)
+			}
+			ranges = append(ranges, Range{
+				Ecosystem: scheme, Start: version, StartInclusive: true, End: version, EndInclusive: true, Exact: true,
+			})
+		}
+		if len(ranges) == 0 && withdrawn == nil {
+			return nil, fmt.Errorf("osv %s %s:%s has no affected version", body.ID, ecosystem, name)
+		}
+		if withdrawn != nil {
+			ranges = nil
+			fixed = nil
+		}
 		selector := ecosystem + ":" + name
 		out = append(out, Record{
-			SourceRecordID:  body.ID + "#" + selector,
-			VulnerabilityID: vulnerabilityID,
-			Ecosystem:       storedEcosystem(ecosystem),
-			ProductSelector: selector,
-			Ranges:          ranges,
-			FixedVersions:   fixed,
-			SeverityData:    severityData,
-			Severity:        severity,
-			PublishedAt:     published,
-			ModifiedAt:      modified,
-			Raw:             append([]byte(nil), raw...),
+			SourceRecordID:      body.ID + "#" + selector,
+			VulnerabilityID:     vulnerabilityID,
+			Ecosystem:           scheme,
+			ProductSelector:     selector,
+			Ranges:              ranges,
+			FixedVersions:       fixed,
+			PlatformConstraints: platform,
+			SeverityData:        severityData,
+			Severity:            severity,
+			PublishedAt:         published,
+			ModifiedAt:          modified,
+			Raw:                 append([]byte(nil), raw...),
 		})
 	}
 	return out, nil
@@ -233,20 +263,81 @@ func osvRanges(items []struct {
 	return ranges, fixed, nil
 }
 
-func storedEcosystem(source string) string {
-	switch strings.ToLower(strings.TrimSpace(source)) {
+func classifyOSVEcosystem(source, name string) (string, json.RawMessage) {
+	lower := strings.ToLower(strings.TrimSpace(source))
+	parts := strings.Split(lower, ":")
+	head := parts[0]
+	scheme := lower
+	switch head {
 	case "debian", "ubuntu":
-		return "deb"
-	case "redhat", "red hat", "rhel", "rocky linux", "almalinux", "alma linux", "fedora", "suse", "opensuse", "opensuse leap":
-		return "rpm"
-	default:
-		return strings.ToLower(strings.TrimSpace(source))
+		scheme = "deb"
+	case "alpine":
+		scheme = "apk"
+	case "red hat", "redhat", "rhel", "rocky linux", "rocky", "almalinux", "alma linux", "alma", "fedora", "suse", "sles", "opensuse", "opensuse leap", "mageia":
+		scheme = "rpm"
+	case "go", "npm", "crates.io", "hex", "pub", "swifturl", "pypi", "maven", "rubygems", "nuget", "packagist", "semver":
+		scheme = head
+	case "cargo":
+		scheme = "crates.io"
+	case "swift":
+		scheme = "swifturl"
+	case "composer":
+		scheme = "packagist"
 	}
+	distribution, release := osvRelease(parts)
+	if distribution == "" || release == "" {
+		return scheme, nil
+	}
+	raw, err := json.Marshal(struct {
+		Distribution string `json:"distribution"`
+		Release      string `json:"release"`
+		Package      string `json:"package"`
+	}{distribution, release, name})
+	if err != nil {
+		return scheme, nil
+	}
+	return scheme, raw
+}
+
+func osvRelease(parts []string) (string, string) {
+	if len(parts) < 2 || parts[1] == "" {
+		return "", ""
+	}
+	switch parts[0] {
+	case "debian":
+		if len(parts) == 2 {
+			return "debian", parts[1]
+		}
+	case "ubuntu":
+		if parts[1] == "pro" && len(parts) >= 3 && parts[2] != "" {
+			return "ubuntu-pro", parts[2]
+		}
+		if parts[1] != "pro" {
+			return "ubuntu", parts[1]
+		}
+	case "alpine":
+		return "alpine", parts[1]
+	case "red hat", "redhat", "rhel":
+		if len(parts) >= 3 && parts[2] != "" {
+			return "rhel", parts[2]
+		}
+	case "rocky linux", "rocky":
+		return "rocky", parts[1]
+	case "almalinux", "alma linux", "alma":
+		return "almalinux", parts[1]
+	case "fedora":
+		return "fedora", parts[1]
+	}
+	return "", ""
 }
 
 func rangeEcosystem(rangeType, ecosystem string) string {
-	if strings.EqualFold(rangeType, "GIT") {
+	switch strings.ToUpper(strings.TrimSpace(rangeType)) {
+	case "GIT":
 		return "git"
+	case "SEMVER":
+		return "semver"
+	default:
+		return ecosystem
 	}
-	return ecosystem
 }

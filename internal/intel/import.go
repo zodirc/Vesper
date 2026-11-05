@@ -24,6 +24,12 @@ const (
 	SourceOSV     = "osv"
 	SourceCISAKEV = "cisa_kev"
 	SourceEPSS    = "epss"
+	// SourceVendor 是 CSAF 2.0 厂商安全公告或 VEX。
+	// SourceVendor is a CSAF 2.0 vendor security advisory or VEX document.
+	SourceVendor = "vendor_advisory"
+	// SourceDistro 是 Debian 或 Ubuntu 安全跟踪器文档。
+	// SourceDistro is a Debian or Ubuntu security-tracker document.
+	SourceDistro = "distro_advisory"
 )
 
 // Record 是一条尚未分配内部 ID 的标准化情报。Raw 是参与摘要的原始记录字节。
@@ -45,6 +51,9 @@ type Record struct {
 	PublishedAt              *time.Time
 	ModifiedAt               *time.Time
 	Raw                      []byte
+	// WithdrawsPrior 表示这条记录撤销同一来源、同一漏洞下已经发布的受影响范围。
+	// WithdrawsPrior means this record withdraws affected ranges already published for the same source and vulnerability.
+	WithdrawsPrior bool
 }
 
 // Range 是从来源事件转换出的版本区间，生态名称保持来源语义。
@@ -55,10 +64,12 @@ type Range struct {
 	StartInclusive bool
 	End            string
 	EndInclusive   bool
+	Exact          bool
+	Excluded       bool
 }
 
-// Parse 按来源校验并规范化整份文档。source 取 nvd、osv、cisa_kev 或 epss。
-// Parse validates and normalizes a whole document for one source. source is nvd, osv, cisa_kev, or epss.
+// Parse 按来源校验并规范化整份文档。source 取 nvd、osv、cisa_kev、epss、vendor_advisory 或 distro_advisory。
+// Parse validates and normalizes a whole document for one source. source is nvd, osv, cisa_kev, epss, vendor_advisory, or distro_advisory.
 //
 // 文档超过大小上限、结构不符合该来源、严重性或分数越界、同一来源记录内容冲突时返回错误，并且不返回记录。
 // It returns an error and no records when the document exceeds the size limit, does not match the source structure, has an out-of-range severity or score, or contains conflicting content for one source record.
@@ -84,6 +95,10 @@ func Parse(source string, document []byte) ([]Record, error) {
 		records, err = parseKEV(document)
 	case SourceEPSS:
 		records, err = parseEPSS(document)
+	case SourceVendor:
+		records, err = parseCSAF(document)
+	case SourceDistro:
+		records, err = parseDistro(document)
 	default:
 		err = fmt.Errorf("intel source %s is not supported", source)
 	}
@@ -113,8 +128,8 @@ func Parse(source string, document []byte) ([]Record, error) {
 	return dedupeRecords(records), nil
 }
 
-// CanonicalSource 把调用方写的来源名规范为稳定标识。厂商公告和发行版公告没有对应的文档适配器。
-// CanonicalSource normalizes a caller-supplied source name to a stable identifier. Vendor and distribution advisories have no document adapter.
+// CanonicalSource 把调用方写的来源名规范为稳定标识。
+// CanonicalSource normalizes a caller-supplied source name to a stable identifier.
 func CanonicalSource(source string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(source)) {
 	case "nvd":
@@ -125,6 +140,10 @@ func CanonicalSource(source string) (string, error) {
 		return SourceCISAKEV, nil
 	case "epss", "first epss":
 		return SourceEPSS, nil
+	case "vendor_advisory", "vendor", "csaf":
+		return SourceVendor, nil
+	case "distro_advisory", "distro", "distribution":
+		return SourceDistro, nil
 	default:
 		return "", fmt.Errorf("intel source %q is not supported", source)
 	}
