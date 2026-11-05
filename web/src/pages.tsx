@@ -942,8 +942,8 @@ export function IntelPage() {
     setError(null);
     setText("");
     try {
-      const result = await client.request<{ detections: number }>("POST", `/api/v1/intel/snapshots/${id}/reassess`);
-      setText(`重新评估追加了 ${result.detections} 条检测。这次不创建补充采集。`);
+      const result = await client.request<{ detections: number; supplemental_scans: number; supplemental_uncovered: number }>("POST", `/api/v1/intel/snapshots/${id}/reassess`);
+      setText(`重新评估追加了 ${result.detections} 条检测，创建了 ${result.supplemental_scans} 条补充采集。${result.supplemental_uncovered} 个目标没有可用授权或不能采集。`);
     } catch (err) {
       setError(err);
     }
