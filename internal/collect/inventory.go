@@ -93,11 +93,16 @@ func readCmdline(path string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	text := strings.TrimSpace(strings.ReplaceAll(string(body), "\x00", " "))
+	text, truncated := boundCommandLine(strings.ReplaceAll(string(body), "\x00", " "))
+	return text, truncated, nil
+}
+
+func boundCommandLine(text string) (string, bool) {
+	text = strings.TrimSpace(text)
 	if len(text) <= cmdlineLimit {
-		return text, false, nil
+		return text, false
 	}
-	return text[:cmdlineLimit], true, nil
+	return text[:cmdlineLimit], true
 }
 
 func processState(stat string) (string, bool) {
@@ -132,8 +137,8 @@ func ParseServiceList(text string) []map[string]any {
 // ParseDpkgStatus 读取 dpkg status 中状态为 installed 的软件包。
 // ParseDpkgStatus reads packages whose status is installed from a dpkg status file.
 //
-// 只保留包名、版本和体系结构。配置文件残留和未安装记录不进入结果。
-// Only the package name, version, and architecture are kept. Configuration-file remnants and records that are not installed are omitted.
+// 只保留包名、版本和体系结构。Source 的第一个字段写入 source_package。配置文件残留和未安装记录不进入结果。
+// Only the package name, version, and architecture are kept. The first field of Source is stored as source_package. Configuration-file remnants and records that are not installed are omitted.
 func ParseDpkgStatus(text string) []map[string]any {
 	var records []map[string]any
 	for _, block := range strings.Split(text, "\n\n") {
@@ -152,11 +157,25 @@ func ParseDpkgStatus(text string) []map[string]any {
 		if len(status) < 3 || status[2] != "installed" || fields["Package"] == "" || fields["Version"] == "" {
 			continue
 		}
-		records = append(records, map[string]any{
+		item := map[string]any{
 			"name": fields["Package"], "version": fields["Version"], "architecture": fields["Architecture"], "source": "dpkg",
-		})
+		}
+		if source := sourcePackage(fields["Source"]); source != "" {
+			item["source_package"] = source
+		}
+		records = append(records, item)
 	}
 	return records
+}
+
+// sourcePackage 取 dpkg Source 字段的包名。版本括号不进入包名。
+// sourcePackage takes the package name from a dpkg Source field. A parenthesized version is not part of the name.
+func sourcePackage(value string) string {
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
 
 // ParseRPMQuery 解析 rpm 查询的五列文本：名称、纪元、版本、发布号、体系结构。

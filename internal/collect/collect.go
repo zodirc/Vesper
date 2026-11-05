@@ -1,5 +1,5 @@
-// Package collect 通过固定操作采集本机信息。未实现的操作返回 unsupported，不用空结果表示平台不支持。
-// Package collect gathers local host facts through fixed operations. An unimplemented operation returns unsupported and does not use an empty result to mean the platform lacks support.
+// Package collect 通过固定操作采集本机信息。Linux 与 Windows 各自实现这七项操作。没有对应系统接口时返回 unsupported，不用空结果表示平台不支持。
+// Package collect gathers local host facts through fixed operations. Linux and Windows each implement the seven operations. An operation returns unsupported when the system interface is absent, and an empty result is not used to mean the platform lacks support.
 package collect
 
 const (

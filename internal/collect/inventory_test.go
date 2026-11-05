@@ -45,6 +45,10 @@ func TestServicePackageAndFirewallParsers(t *testing.T) {
 	if len(packages) != 1 || packages[0]["name"] != "nginx" || packages[0]["version"] != "1.24.0-1" || packages[0]["source"] != "dpkg" {
 		t.Fatalf("packages = %+v", packages)
 	}
+	sourced := ParseDpkgStatus("Package: libssl3\nStatus: install ok installed\nSource: openssl (3.0.11-1)\nVersion: 3.0.11-1\nArchitecture: amd64\n")
+	if len(sourced) != 1 || sourced[0]["source_package"] != "openssl" {
+		t.Fatalf("source package = %+v", sourced)
+	}
 	rpm, err := ParseRPMQuery("bash\t0\t5.1.8\t9.el8\tx86_64\n\nbad line\n")
 	if err == nil || rpm != nil {
 		t.Fatalf("rpm = %+v err = %v", rpm, err)

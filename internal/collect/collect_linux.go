@@ -4,8 +4,6 @@ package collect
 
 import (
 	"bufio"
-	"errors"
-	"net"
 	"os"
 	"strings"
 )
@@ -58,29 +56,8 @@ func collectOS() (Result, error) {
 		Operation: "collect_os_info", Status: StatusCollected,
 		PlatformFamily: "linux", PlatformName: values["NAME"], PlatformVersion: values["VERSION_ID"],
 		MachineIDHash: hash,
-		Value:         map[string]any{"name": values["NAME"], "version_id": values["VERSION_ID"], "id": values["ID"], "machine_id_hash": hash},
+		Value:         map[string]any{"name": values["NAME"], "version_id": values["VERSION_ID"], "id": values["ID"], "version_codename": values["VERSION_CODENAME"], "machine_id_hash": hash},
 	}, nil
-}
-
-func collectInterfaces() (Result, error) {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return deniedOrError("collect_interfaces", err), nil
-	}
-	var items []map[string]any
-	for _, iface := range ifaces {
-		addrs, _ := iface.Addrs()
-		var texts []string
-		for _, addr := range addrs {
-			texts = append(texts, addr.String())
-		}
-		items = append(items, map[string]any{"name": iface.Name, "hardware_addr": iface.HardwareAddr.String(), "addresses": texts})
-	}
-	status := StatusCollected
-	if len(items) == 0 {
-		status = StatusEmpty
-	}
-	return Result{Operation: "collect_interfaces", Status: status, Value: map[string]any{"interfaces": items}}, nil
 }
 
 func collectListening() (Result, error) {
@@ -108,15 +85,4 @@ func readProc(path, transport string) ([]Socket, error) {
 	}
 	defer file.Close()
 	return ParseProcNet(file, transport)
-}
-
-func deniedOrError(operation string, err error) Result {
-	status := StatusError
-	if errors.Is(err, os.ErrPermission) {
-		status = StatusPermissionDenied
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		status = StatusUnsupported
-	}
-	return Result{Operation: operation, Status: status, Value: map[string]any{"error": err.Error()}}
 }
