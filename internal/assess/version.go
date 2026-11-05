@@ -9,19 +9,33 @@ import (
 // NormalizeVersion 按产品生态生成可比较的版本文本，不改写调用方持有的原始字符串。
 // NormalizeVersion builds comparable version text for a product ecosystem. It does not rewrite the caller's original string.
 //
-// generic 去掉数字分量的前导零。deb 写成 epoch:upstream 或 epoch:upstream-revision。rpm 写成 epoch:version 或 epoch:version-release。无法按该生态解析，以及其他生态，返回空字符串和 false。
-// generic strips leading zeros from numeric components. deb is rendered as epoch:upstream or epoch:upstream-revision. rpm is rendered as epoch:version or epoch:version-release. An empty string and false are returned when the version cannot be parsed for that ecosystem, and for every other ecosystem.
+// generic 去掉数字分量的前导零。deb 写成 epoch:upstream 或 epoch:upstream-revision。rpm 写成 epoch:version 或 epoch:version-release。apk 保留 apk-tools 接受的原文。semver、npm、Go、crates.io、Hex、Pub 和 Swift 按 SemVer 2.0.0 去掉可选的前导 v。pypi 按 PEP 440 写成规范文本。maven 按 ComparableVersion 写成规范文本。rubygems、nuget 和 packagist 写成各自的规范文本。无法按该生态解析，以及其他生态，返回空字符串和 false。
+// generic strips leading zeros from numeric components. deb is rendered as epoch:upstream or epoch:upstream-revision. rpm is rendered as epoch:version or epoch:version-release. apk keeps text accepted by apk-tools. semver, npm, Go, crates.io, Hex, Pub, and Swift follow SemVer 2.0.0 and drop an optional leading v. pypi uses the PEP 440 canonical text. maven uses the ComparableVersion canonical text. rubygems, nuget, and packagist use their own canonical text. An empty string and false are returned when the version cannot be parsed for that ecosystem, and for every other ecosystem.
 func NormalizeVersion(ecosystem, raw string) (string, bool) {
 	if raw == "" {
 		return "", false
 	}
-	switch ecosystem {
+	switch Scheme(ecosystem) {
 	case "generic":
 		return normalizeGeneric(raw)
 	case "deb":
 		return normalizeDeb(raw)
 	case "rpm":
 		return normalizeRPM(raw)
+	case "apk":
+		return normalizeAlpine(raw)
+	case "semver":
+		return normalizeSemver(raw)
+	case "pypi":
+		return normalizePyPI(raw)
+	case "maven":
+		return normalizeMaven(raw)
+	case "rubygems":
+		return normalizeRuby(raw)
+	case "nuget":
+		return normalizeNuGet(raw)
+	case "composer":
+		return normalizeComposer(raw)
 	default:
 		return "", false
 	}
