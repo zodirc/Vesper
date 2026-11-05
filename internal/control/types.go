@@ -96,6 +96,12 @@ type Finding struct {
 	LastSeenAt       time.Time
 	ResolvedAt       *time.Time
 	LastOccurrenceID id.ID
+	// ActiveDispositionID 是当前仍有效的处置。没有生效处置时为零。
+	// ActiveDispositionID is the disposition that is currently in effect. It is zero when none is in effect.
+	ActiveDispositionID id.ID
+	// ActiveDispositionType 是该处置的类型。状态枚举不区分 accept_risk 与 exception，也不区分 suppress 与 false_positive，类型留在这里。
+	// ActiveDispositionType is that disposition's type. The status enum does not distinguish accept_risk from exception, or suppress from false_positive, so the type stays here.
+	ActiveDispositionType string
 }
 
 // Occurrence 是一次风险出现，关闭风险时不删除。
@@ -111,13 +117,17 @@ type Occurrence struct {
 	ConditionDigest string
 }
 
-// Product 是规范产品身份。
-// Product is a canonical product identity.
+// Product 是规范产品身份。厂商、产品系列、CPE 和 PURL 只在目录输入提供时填写。
+// Product is a canonical product identity. Vendor, product family, CPE, and PURL are set only when the catalog input provides them.
 type Product struct {
-	ID           id.ID
-	Ecosystem    string
-	ProductName  string
-	CanonicalKey string
+	ID            id.ID
+	Ecosystem     string
+	ProductName   string
+	CanonicalKey  string
+	Vendor        string
+	ProductFamily string
+	CPE23         string
+	PURL          string
 }
 
 // Revision 是授权状态变更的审计记录。
