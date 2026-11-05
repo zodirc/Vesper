@@ -29,7 +29,7 @@ func TestImportIntelRejectsUnknownSource(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/intel/imports", bytes.NewReader([]byte(`{"source":"vendor","document":{}}`)))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/intel/imports", bytes.NewReader([]byte(`{"source":"exploitdb","document":{}}`)))
 	request.Header.Set("Authorization", "Bearer "+session.Token)
 	response = httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)

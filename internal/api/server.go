@@ -16,6 +16,7 @@ import (
 	"github.com/zodirc/Vesper/internal/configrule"
 	"github.com/zodirc/Vesper/internal/control"
 	"github.com/zodirc/Vesper/internal/id"
+	"github.com/zodirc/Vesper/internal/identity"
 	"github.com/zodirc/Vesper/internal/nmapfinger"
 	"github.com/zodirc/Vesper/internal/scope"
 )
@@ -83,14 +84,26 @@ func (s *Server) Handler() http.Handler {
 	s.prepare()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/sessions", s.createSession)
+	mux.HandleFunc("DELETE /api/v1/sessions", s.authenticated(s.deleteSession))
 	mux.HandleFunc("GET /api/v1/observation-points", s.authenticated(s.observationPoints))
+	mux.HandleFunc("GET /api/v1/grants", s.authenticated(s.listGrants))
+	mux.HandleFunc("GET /api/v1/grants/{id}/revisions", s.authenticated(s.listGrantRevisions))
 	mux.HandleFunc("POST /api/v1/grants", s.authenticated(s.createGrant))
 	mux.HandleFunc("POST /api/v1/grants/{id}/approve", s.authenticated(s.approveGrant))
 	mux.HandleFunc("POST /api/v1/grants/{id}/revoke", s.authenticated(s.revokeGrant))
+	mux.HandleFunc("GET /api/v1/scan-runs", s.authenticated(s.listScans))
 	mux.HandleFunc("POST /api/v1/scan-runs", s.authenticated(s.createScan))
 	mux.HandleFunc("GET /api/v1/scan-runs/{id}", s.authenticated(s.getScan))
 	mux.HandleFunc("POST /api/v1/scan-runs/{id}/cancel", s.authenticated(s.cancelScan))
 	mux.HandleFunc("GET /api/v1/scan-runs/{id}/observations", s.authenticated(s.listObservations))
+	mux.HandleFunc("GET /api/v1/scan-schedules", s.authenticated(s.listSchedules))
+	mux.HandleFunc("POST /api/v1/scan-schedules", s.authenticated(s.createSchedule))
+	mux.HandleFunc("POST /api/v1/scan-schedules/{id}/disable", s.authenticated(s.disableSchedule))
+	mux.HandleFunc("POST /api/v1/scan-schedules/{id}/enable", s.authenticated(s.enableSchedule))
+	mux.HandleFunc("GET /api/v1/assets", s.authenticated(s.listAssets))
+	mux.HandleFunc("GET /api/v1/endpoints", s.authenticated(s.listEndpoints))
+	mux.HandleFunc("GET /api/v1/targets", s.authenticated(s.listTargets))
+	mux.HandleFunc("GET /api/v1/hypotheses", s.authenticated(s.listHypotheses))
 	mux.HandleFunc("GET /api/v1/findings", s.authenticated(s.listFindings))
 	mux.HandleFunc("GET /api/v1/findings/{id}/dispositions", s.authenticated(s.listDispositions))
 	mux.HandleFunc("POST /api/v1/findings/{id}/dispositions", s.authenticated(s.createDisposition))
@@ -108,8 +121,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/active-templates/{id}/publish", s.authenticated(s.publishActiveTemplate))
 	mux.HandleFunc("POST /api/v1/active-templates/{id}/disable", s.authenticated(s.disableActiveTemplate))
 	mux.HandleFunc("POST /api/v1/intel/imports", s.authenticated(s.importIntel))
+	mux.HandleFunc("GET /api/v1/intel/feeds", s.authenticated(s.listFeeds))
+	mux.HandleFunc("POST /api/v1/intel/feeds/{source}/sync", s.authenticated(s.syncFeed))
 	mux.HandleFunc("GET /api/v1/intel/snapshots", s.authenticated(s.listIntelSnapshots))
 	mux.HandleFunc("POST /api/v1/intel/snapshots/{id}/reassess", s.authenticated(s.reassessIntel))
+	mux.Handle("GET /", s.userInterface())
 	return mux
 }
 
@@ -190,6 +206,68 @@ func actorFrom(r *http.Request) (id.ID, bool) {
 	return actor, ok && !actor.IsZero()
 }
 
+func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
+	tokenText := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	token, err := id.Parse(tokenText)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "authentication_required", "authentication required")
+		return
+	}
+	if err := s.Service.DropAPISession(r.Context(), token); err != nil {
+		writeError(w, http.StatusInternalServerError, "session_error", err.Error())
+		return
+	}
+	s.mu.Lock()
+	delete(s.sessions, tokenText)
+	s.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) listGrants(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"grants": s.Service.Grants()})
+}
+
+func (s *Server) listGrantRevisions(w http.ResponseWriter, r *http.Request) {
+	grantID, err := id.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", err.Error())
+		return
+	}
+	if _, err := s.Service.Grant(grantID); err != nil {
+		writeError(w, http.StatusNotFound, "not_found", err.Error())
+		return
+	}
+	revisions := s.Service.Revisions(grantID)
+	if revisions == nil {
+		revisions = []control.Revision{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revisions": revisions})
+}
+
+func (s *Server) listScans(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"scan_runs": s.Service.Runs()})
+}
+
+func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"assets": s.Service.Assets()})
+}
+
+func (s *Server) listEndpoints(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"endpoints": s.Service.Endpoints()})
+}
+
+func (s *Server) listTargets(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"targets": s.Service.Targets()})
+}
+
+func (s *Server) listHypotheses(w http.ResponseWriter, r *http.Request) {
+	items := s.Service.Hypotheses()
+	if items == nil {
+		items = []identity.Hypothesis{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"hypotheses": items})
+}
+
 func (s *Server) observationPoints(w http.ResponseWriter, r *http.Request) {
 	point := s.Service.ObservationPointView()
 	writeJSON(w, http.StatusOK, map[string]any{"observation_points": []map[string]any{{
@@ -264,6 +342,55 @@ func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": scope.StatusRevoked})
+}
+
+func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"scan_schedules": s.Service.Schedules()})
+}
+
+func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
+	var body control.ScheduleInput
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return
+	}
+	item, err := s.Service.CreateSchedule(r.Context(), body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "schedule_rejected", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) disableSchedule(w http.ResponseWriter, r *http.Request) {
+	s.setSchedule(w, r, false)
+}
+
+func (s *Server) enableSchedule(w http.ResponseWriter, r *http.Request) {
+	s.setSchedule(w, r, true)
+}
+
+func (s *Server) setSchedule(w http.ResponseWriter, r *http.Request, enabled bool) {
+	scheduleID, err := id.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", err.Error())
+		return
+	}
+	var item control.Schedule
+	if enabled {
+		item, err = s.Service.EnableSchedule(r.Context(), scheduleID)
+	} else {
+		item, err = s.Service.DisableSchedule(r.Context(), scheduleID)
+	}
+	if errors.Is(err, control.ErrScheduleNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", err.Error())
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "schedule_rejected", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
 }
 
 func (s *Server) createScan(w http.ResponseWriter, r *http.Request) {
@@ -373,6 +500,8 @@ func (s *Server) createDisposition(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", err.Error())
 		case errors.Is(err, control.ErrDispositionVerification):
 			writeError(w, http.StatusConflict, "verification_required", err.Error())
+		case errors.Is(err, control.ErrDispositionState):
+			writeError(w, http.StatusConflict, "disposition_conflict", err.Error())
 		default:
 			writeError(w, http.StatusBadRequest, "disposition_rejected", err.Error())
 		}
@@ -632,6 +761,27 @@ func (s *Server) importIntel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": snapshot.ID.String(), "content_digest": snapshot.ContentDigest,
 		"sources": snapshot.Sources, "statement_count": len(snapshot.StatementIDs), "published_at": snapshot.PublishedAt,
+	})
+}
+
+func (s *Server) listFeeds(w http.ResponseWriter, r *http.Request) {
+	feeds := s.Service.Feeds()
+	if feeds == nil {
+		feeds = []control.FeedStatus{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"feeds": feeds})
+}
+
+func (s *Server) syncFeed(w http.ResponseWriter, r *http.Request) {
+	snapshot, status, err := s.Service.SyncFeed(r.Context(), r.PathValue("source"))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "feed_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": snapshot.ID.String(), "content_digest": snapshot.ContentDigest, "sources": snapshot.Sources,
+		"statement_count": len(snapshot.StatementIDs), "published_at": snapshot.PublishedAt,
+		"source": status.Source, "cursor": status.Cursor, "last_result": status.LastResult,
 	})
 }
 
