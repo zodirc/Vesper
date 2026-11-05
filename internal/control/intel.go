@@ -58,11 +58,11 @@ func (s *Service) ImportIntel(ctx context.Context, source string, document []byt
 	return published, err
 }
 
-// Reassess 用指定情报快照对已有服务候选重新做适用性判断。
-// Reassess judges applicability of existing service candidates again with one selected intelligence snapshot.
+// Reassess 用指定情报快照对已有服务候选和已采集的发行版软件包重新做适用性判断。
+// Reassess judges applicability of existing service candidates and collected distribution packages again with one selected intelligence snapshot.
 //
-// 已有观察和已有检测结果保持不变。新的判断写入新的评估运行。证据过期后的补充采集没有设计给出的时限，这里不创建新的扫描。
-// Existing observations and detection results stay unchanged. The new judgment is stored as a new assessment run. Supplemental collection after evidence expiry has no designed time limit, so this does not create a scan.
+// 已有观察、已有候选和已有检测结果保持不变。当前已发布的指纹规则会追加新的服务候选，当前已发布的配置规则会用每个资产最新的主机观察再判断一次。同一快照、同一主体、同一规则和同一输入已经有相同结论时不再追加。新的确认会更新 Finding 的当前严重性。证据过期后的补充采集没有设计给出的时限，这里不创建新的扫描，也不写入 resolve。
+// Existing observations, candidates, and detection results stay unchanged. The currently published fingerprint rules append new service candidates, and the currently published configuration rules judge each asset's latest host observations again. An identical conclusion for the same snapshot, subject, rule, and inputs is not appended. A new confirmation updates the Finding's current severity. Supplemental collection after evidence expiry has no designed time limit, so this does not create a scan and does not write resolve.
 func (s *Service) Reassess(ctx context.Context, snapshotID id.ID) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -75,10 +75,19 @@ func (s *Service) Reassess(ctx context.Context, snapshotID id.ID) (int, error) {
 			return fmt.Errorf("reassess: intel snapshot %s not found", snapshotID)
 		}
 		before := len(s.detections)
+		if err := s.reidentify(snapshotID); err != nil {
+			return err
+		}
+		if err := s.reevaluateConfigs(snapshotID); err != nil {
+			return err
+		}
 		for _, item := range s.hypotheses {
 			if err := s.judgeHypothesis(snapshotID, item); err != nil {
 				return err
 			}
+		}
+		if err := s.judgeDistroPackages(snapshotID, id.ID{}); err != nil {
+			return err
 		}
 		added = len(s.detections) - before
 		return nil
@@ -109,6 +118,12 @@ func (s *Service) stageRecords(records []intel.Record, now time.Time) error {
 		if !intel.ValidSeverity(statement.Severity) && statement.Severity != "" {
 			return fmt.Errorf("intel statement %s has severity %s", statement.SourceRecordID, statement.Severity)
 		}
+		if record.WithdrawsPrior {
+			if err := s.withdrawVulnerability(record, now); err != nil {
+				return err
+			}
+			continue
+		}
 		previous, ok := s.latestStatement(statement.Source, statement.SourceRecordID)
 		if ok && previous.RawRecordDigest == statement.RawRecordDigest {
 			continue
@@ -132,7 +147,7 @@ func statementFromRecord(record intel.Record, now time.Time) (assess.Statement, 
 	sum := sha256.Sum256(record.Raw)
 	ranges := make([]assess.Range, len(record.Ranges))
 	for i, item := range record.Ranges {
-		ranges[i] = assess.Range{Ecosystem: item.Ecosystem, Start: item.Start, StartInclusive: item.StartInclusive, End: item.End, EndInclusive: item.EndInclusive}
+		ranges[i] = assess.Range{Ecosystem: item.Ecosystem, Start: item.Start, StartInclusive: item.StartInclusive, End: item.End, EndInclusive: item.EndInclusive, Exact: item.Exact, Excluded: item.Excluded}
 	}
 	return assess.Statement{
 		Source: record.Source, SourceRecordID: record.SourceRecordID, VulnerabilityID: record.VulnerabilityID,
@@ -218,6 +233,68 @@ func (s *Service) statementsIn(snapshotID id.ID) []assess.Statement {
 	return out
 }
 
+func (s *Service) withdrawVulnerability(record intel.Record, now time.Time) error {
+	latest := map[string]assess.Statement{}
+	for _, item := range s.statements {
+		if item.Source != record.Source || item.VulnerabilityID != record.VulnerabilityID || item.SourceRecordID == "" {
+			continue
+		}
+		previous, ok := latest[item.SourceRecordID]
+		if !ok || item.ImportedAt.After(previous.ImportedAt) || (item.ImportedAt.Equal(previous.ImportedAt) && item.ID.String() > previous.ID.String()) {
+			latest[item.SourceRecordID] = item
+		}
+	}
+	sum := sha256.Sum256(record.Raw)
+	digest := hex.EncodeToString(sum[:])
+	if len(latest) == 0 {
+		record.WithdrawsPrior = false
+		record.Ranges = nil
+		record.FixedVersions = nil
+		record.PlatformConstraints = nil
+		record.ConfigurationConstraints = nil
+		if record.SourceRecordID == "" {
+			record.SourceRecordID = record.VulnerabilityID
+		}
+		statement, err := statementFromRecord(record, now)
+		if err != nil {
+			return err
+		}
+		statement.ID, err = id.New()
+		if err != nil {
+			return err
+		}
+		s.statements = append(s.statements, statement)
+		return nil
+	}
+	for _, previous := range latest {
+		if previous.RawRecordDigest == digest && len(previous.Ranges) == 0 && !hasConstraint(previous.PlatformConstraints) && !hasConstraint(previous.ConfigurationConstraints) {
+			continue
+		}
+		next := previous
+		next.Ranges = nil
+		next.FixedVersions = nil
+		next.PlatformConstraints = nil
+		next.ConfigurationConstraints = nil
+		next.Severity = record.Severity
+		next.SeverityData = append(json.RawMessage(nil), record.SeverityData...)
+		next.KEV = false
+		next.EPSS = nil
+		next.SupersedesID = previous.ID
+		next.RawRecordDigest = digest
+		next.ImportedAt = now
+		if !next.ImportedAt.After(previous.ImportedAt) {
+			next.ImportedAt = previous.ImportedAt.Add(time.Nanosecond)
+		}
+		var err error
+		next.ID, err = id.New()
+		if err != nil {
+			return err
+		}
+		s.statements = append(s.statements, next)
+	}
+	return nil
+}
+
 func (s *Service) latestStatement(source, sourceRecordID string) (assess.Statement, bool) {
 	var found assess.Statement
 	ok := false
@@ -241,44 +318,106 @@ func (s *Service) judgeHypothesis(snapshotID id.ID, item identity.Hypothesis) er
 	if !ok {
 		return nil
 	}
-	var assessmentID id.ID
+	var batch []serviceJudgment
 	for _, statement := range s.statementsIn(snapshotID) {
 		if len(statement.Ranges) == 0 || !statementApplies(product, s.aliases, statement) {
 			continue
 		}
-		if assessmentID.IsZero() {
-			var err error
-			assessmentID, err = id.New()
-			if err != nil {
-				return err
-			}
-		}
 		ecosystem := statement.Ecosystem
-		if ecosystem == "" {
+		if ecosystem == "" || ecosystem == "cpe" {
 			ecosystem = product.Ecosystem
 		}
-		applicability := applicabilityFor(ecosystem, item.RawVersion, statement)
+		version := item.RawVersion
+		result := applicabilityFor(ecosystem, version, statement)
+		if result == assess.InsufficientEvidence && item.NormalizedVersion != "" && item.NormalizedVersion != version {
+			if again := applicabilityFor(ecosystem, item.NormalizedVersion, statement); again != assess.InsufficientEvidence {
+				result = again
+				version = item.NormalizedVersion
+			}
+		}
+		if item.IdentityStatus == "conflict" && result == assess.Affected {
+			result = assess.Conflict
+		}
+		batch = append(batch, serviceJudgment{
+			statement: statement, result: result, version: version, evidence: s.verifiedEvidence(item.SupportingObservationIDs),
+		})
+	}
+	markServiceContradictions(batch)
+	if len(batch) == 0 {
+		return nil
+	}
+	assessmentID, err := id.New()
+	if err != nil {
+		return err
+	}
+	for _, judged := range batch {
+		detection := Detection{
+			AssessmentRunID: assessmentID, EndpointID: item.EndpointID, SubjectType: "endpoint", SubjectID: item.EndpointID,
+			VulnerabilityID: judged.statement.VulnerabilityID, ResultStatus: mapApplicability(judged.result), Severity: judged.statement.Severity,
+			Summary: judged.result, EvidenceIDs: judged.evidence, InputObservationIDs: append([]id.ID(nil), item.SupportingObservationIDs...),
+			IntelSnapshotID: snapshotID, EvaluatedAt: s.now(),
+		}
+		if s.duplicateDetection(detection) {
+			continue
+		}
 		detectionID, err := id.New()
 		if err != nil {
 			return err
 		}
-		evidenceIDs := s.verifiedEvidence(item.SupportingObservationIDs)
-		s.detections = append(s.detections, Detection{
-			ID: detectionID, AssessmentRunID: assessmentID, EndpointID: item.EndpointID, SubjectType: "endpoint", SubjectID: item.EndpointID,
-			VulnerabilityID: statement.VulnerabilityID, ResultStatus: mapApplicability(applicability), Severity: statement.Severity,
-			Summary: applicability, EvidenceIDs: evidenceIDs, InputObservationIDs: append([]id.ID(nil), item.SupportingObservationIDs...),
-			IntelSnapshotID: snapshotID, EvaluatedAt: s.now(),
-		})
-		if mapApplicability(applicability) != "confirmed" {
+		detection.ID = detectionID
+		s.detections = append(s.detections, detection)
+		if detection.ResultStatus != "confirmed" {
 			continue
 		}
-		s.mergeFinding(item.EndpointID, id.ID{}, statement.VulnerabilityID, detectionID, assessmentID, item.RawVersion, "vulnerability", statement.Severity, evidenceIDs, id.ID{}, derefID(item.ProductIdentityID))
+		s.mergeFinding(item.EndpointID, id.ID{}, judged.statement.VulnerabilityID, detectionID, assessmentID, judged.version, "vulnerability", judged.statement.Severity, judged.evidence, id.ID{}, derefID(item.ProductIdentityID))
 	}
 	return nil
 }
 
+type serviceJudgment struct {
+	statement assess.Statement
+	result    string
+	version   string
+	evidence  []id.ID
+}
+
+func markServiceContradictions(batch []serviceJudgment) {
+	type flags struct{ affected, clear bool }
+	groups := map[string]*flags{}
+	for i := range batch {
+		key := batch[i].statement.VulnerabilityID
+		group := groups[key]
+		if group == nil {
+			group = &flags{}
+			groups[key] = group
+		}
+		switch batch[i].result {
+		case assess.Affected:
+			group.affected = true
+		case assess.NotAffected:
+			group.clear = true
+		}
+	}
+	for i := range batch {
+		group := groups[batch[i].statement.VulnerabilityID]
+		if group.affected && group.clear && (batch[i].result == assess.Affected || batch[i].result == assess.NotAffected) {
+			batch[i].result = assess.Conflict
+		}
+	}
+}
+
 func applicabilityFor(ecosystem, version string, statement assess.Statement) string {
-	result := assess.Judge(ecosystem, version, statement)
+	judged := statement
+	if statement.Ecosystem == "cpe" {
+		judged.Ecosystem = ""
+		judged.Ranges = append([]assess.Range(nil), statement.Ranges...)
+		for i := range judged.Ranges {
+			if judged.Ranges[i].Ecosystem == "" || judged.Ranges[i].Ecosystem == "cpe" {
+				judged.Ranges[i].Ecosystem = "generic"
+			}
+		}
+	}
+	result := assess.Judge(ecosystem, version, judged)
 	if result == assess.Affected && (hasConstraint(statement.ConfigurationConstraints) || hasConstraint(statement.PlatformConstraints)) {
 		return assess.InsufficientEvidence
 	}
