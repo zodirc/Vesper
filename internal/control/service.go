@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"strings"
 	"sync"
@@ -109,6 +110,13 @@ type Service struct {
 	db            *pgStore
 	packs         []rule.Pack
 	active        []activeTemplate
+	schedules     map[id.ID]Schedule
+	firing        map[id.ID]struct{}
+	feeds         map[string]FeedStatus
+	feedClient    *http.Client
+	nvdFeedURL    string
+	kevFeedURL    string
+	epssFeedURL   string
 }
 
 // New 创建本机观察点、在线 Worker 和应用服务。
@@ -139,12 +147,11 @@ func New(evidenceRoot string, now func() time.Time) (*Service, error) {
 	return &Service{
 		now: now, tasks: task.NewEngine(30 * time.Second), catalog: asset.NewCatalog(),
 		evidence: evidence.Store{Root: evidenceRoot}, pointID: pointID, principal: principal,
-		worker: task.Worker{ID: workerID, ObservationPointID: pointID, Status: "online", Capabilities: map[string]struct{}{
-			"tcp_connect": {}, "protocol_http": {}, "protocol_tls": {}, "protocol_ssh": {}, "protocol_ftp": {}, "protocol_smtp": {}, "protocol_mysql": {}, "protocol_postgresql": {}, "protocol_redis": {}, "protocol_mongodb": {}, "protocol_tds": {}, "protocol_tns": {}, "protocol_cql": {}, "protocol_bolt": {}, "protocol_memcached": {}, "protocol_clickhouse": {}, "udp_dns": {}, "host_collect": {}, "active_detection": {},
-		}},
+		worker: task.Worker{ID: workerID, ObservationPointID: pointID, Status: "online", Capabilities: localCapabilities()},
 		grants: map[id.ID]scope.Grant{}, frozen: map[id.ID]scope.Grant{}, accounts: map[id.ID]*scope.Account{},
 		baselines:   map[id.ID]scope.Usage{},
 		idempotency: map[string]id.ID{}, products: map[id.ID]Product{}, findings: map[string]*Finding{}, active: []activeTemplate{},
+		schedules: map[id.ID]Schedule{}, firing: map[id.ID]struct{}{}, feeds: map[string]FeedStatus{},
 		resolver: defaultResolver, DialTimeout: 2 * time.Second, packs: packs,
 	}, nil
 }
@@ -188,6 +195,27 @@ func (s *Service) Close() {
 	if s.db != nil {
 		s.db.pool.Close()
 	}
+}
+
+// localCapabilities 是当前构建能够执行的探针和采集能力。
+// localCapabilities is the set of probe and collection capabilities this build can execute.
+//
+// 已保存的本机 Worker 在装入时补齐这里缺少的名称。已创建扫描写入的能力快照不改写。udp_dns 覆盖已注册的 UDP 探针，目前是 DNS 和 NTP。
+// A stored local worker gains any name missing from this set when it is loaded. Capability snapshots already written for a scan stay unchanged. udp_dns covers the registered UDP probes, currently DNS and NTP.
+func localCapabilities() map[string]struct{} {
+	names := []string{
+		"tcp_connect", "protocol_http", "protocol_tls", "protocol_ssh", "protocol_ftp", "protocol_smtp",
+		"protocol_mysql", "protocol_postgresql", "protocol_redis", "protocol_mongodb", "protocol_tds", "protocol_tns",
+		"protocol_cql", "protocol_bolt", "protocol_memcached", "protocol_clickhouse",
+		"protocol_telnet", "protocol_pop3", "protocol_imap", "protocol_vnc", "protocol_nats", "protocol_rdp",
+		"protocol_amqp", "protocol_mqtt", "protocol_kafka",
+		"udp_dns", "host_collect", "active_detection", "zgrab2",
+	}
+	out := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		out[name] = struct{}{}
+	}
+	return out
 }
 
 // ObservationPointID 返回本机观察点标识。
@@ -298,12 +326,7 @@ func (s *Service) Grant(grantID id.ID) (scope.Grant, error) {
 	if !ok {
 		return scope.Grant{}, fmt.Errorf("grant %s: not found", grantID)
 	}
-	grant.Selectors = append([]scope.Selector(nil), grant.Selectors...)
-	grant.AllowedTransports = append([]string(nil), grant.AllowedTransports...)
-	grant.Ports = append([]scope.PortRange(nil), grant.Ports...)
-	grant.AllowedOperations = append([]string(nil), grant.AllowedOperations...)
-	grant.ObservationPointIDs = append([]id.ID(nil), grant.ObservationPointIDs...)
-	return grant, nil
+	return copyGrant(grant), nil
 }
 
 // Revisions 返回某条授权的审计记录副本，顺序与写入顺序一致。
@@ -342,26 +365,12 @@ func (s *Service) expireGrants() error {
 	return nil
 }
 
-// AddProduct 登记规范产品和别名。
-// AddProduct records a canonical product and an alias.
+// AddProduct 登记一个产品和一条产品名别名。厂商、产品系列、CPE 和 PURL 留空。
+// AddProduct records one product and one product-name alias. Vendor, product family, CPE, and PURL stay empty.
 func (s *Service) AddProduct(ecosystem, name, canonicalKey, aliasValue string) (Product, error) {
-	productID, err := id.New()
-	if err != nil {
-		return Product{}, err
-	}
-	aliasID, err := id.New()
-	if err != nil {
-		return Product{}, err
-	}
-	product := Product{ID: productID, Ecosystem: ecosystem, ProductName: name, CanonicalKey: canonicalKey}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.products[productID] = product
-	s.aliases = append(s.aliases, identity.Alias{ID: aliasID, ProductID: productID, Source: "catalog", AliasType: "product_name", Ecosystem: ecosystem, Value: aliasValue})
-	if err := s.flush(context.Background()); err != nil {
-		return Product{}, err
-	}
-	return product, nil
+	return s.AddProductIdentity(Product{Ecosystem: ecosystem, ProductName: name, CanonicalKey: canonicalKey}, []identity.Alias{{
+		Source: "catalog", AliasType: "product_name", Value: aliasValue,
+	}})
 }
 
 // AddStatement 登记一条本地漏洞情报，并在内容变化时发布新的情报快照。KEV 只作为语句属性保存。

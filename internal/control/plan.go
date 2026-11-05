@@ -30,6 +30,12 @@ type planBody struct {
 	ActiveTemplates  []frozenTemplate        `json:"active_templates,omitempty"`
 	NmapFingerprints []string                `json:"nmap_fingerprints,omitempty"`
 	ConfigRules      []string                `json:"config_rules,omitempty"`
+	// ScheduleID 把运行连回创建它的周期。手工扫描和复核扫描留空。
+	// ScheduleID links a run back to the schedule that created it. Manual and verification scans leave it empty.
+	ScheduleID string `json:"schedule_id,omitempty"`
+	// ReassessmentAdded 是这次再评估新增的检测结果数量。只有再评估运行写入。
+	// ReassessmentAdded is the number of detection results this reassessment added. Only a reassessment run writes it.
+	ReassessmentAdded *int `json:"reassessment_added,omitempty"`
 }
 
 type preparedScan struct {
@@ -44,6 +50,7 @@ type preparedScan struct {
 	Condition       string
 	VulnerabilityID string
 	RuleID          id.ID
+	ScheduleID      id.ID
 }
 
 type planFailure struct {
@@ -182,11 +189,15 @@ func (s *Service) startScan(ctx context.Context, prepared preparedScan, now time
 		}
 		nmapPacks := s.publishedNmapFingerprints()
 		configPacks := s.publishedConfigPacks()
+		scheduleID := ""
+		if !prepared.ScheduleID.IsZero() {
+			scheduleID = prepared.ScheduleID.String()
+		}
 		body, err := json.Marshal(planBody{
 			Ports: prepared.Ports, Transport: prepared.Transport, Hostname: prepared.Target.Hostname,
 			FindingID: prepared.FindingID.String(), OccurrenceID: prepared.OccurrenceID.String(),
 			ConditionDigest: prepared.Condition, VulnerabilityID: prepared.VulnerabilityID, Environment: &environment,
-			ActiveTemplates: templates, NmapFingerprints: nmapPacks, ConfigRules: configPacks,
+			ActiveTemplates: templates, NmapFingerprints: nmapPacks, ConfigRules: configPacks, ScheduleID: scheduleID,
 		})
 		if err != nil {
 			return err
@@ -195,6 +206,7 @@ func (s *Service) startScan(ctx context.Context, prepared preparedScan, now time
 			body, err = json.Marshal(planBody{
 				Ports: prepared.Ports, Transport: prepared.Transport, Hostname: prepared.Target.Hostname,
 				Environment: &environment, ActiveTemplates: templates, NmapFingerprints: nmapPacks, ConfigRules: configPacks,
+				ScheduleID: scheduleID,
 			})
 			if err != nil {
 				return err
@@ -440,6 +452,8 @@ func (s *Service) installPlan(runID id.ID, target asset.Target, addresses []neti
 			return err
 		}
 		if plan.Transport == "udp" {
+			// 能力名保持 udp_dns。这个单元按地址领取，执行时按端口选择已注册的 UDP 探针。
+			// The capability name remains udp_dns. The unit is claimed per address, and execution selects a registered UDP probe by port.
 			probe := task.Unit{ScanRunID: runID, TargetID: target.ID, ObservationPointID: s.pointID, UnitType: "udp_probe", StageKey: "udp_probe:" + addr.String(), RequiredCapabilities: []string{"udp_dns"}, Input: payload, Priority: 1, CreatedAt: now}
 			if _, err := s.ensureUnit(probe); err != nil {
 				return err

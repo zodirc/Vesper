@@ -223,6 +223,29 @@ func (e *Engine) CreateRun(run Run) error {
 	return nil
 }
 
+// CompleteWithoutUnits 把一次还没有单元的规划运行标为完成。
+// CompleteWithoutUnits marks a planning run that has no units as completed.
+//
+// 再评估不拨号，因此没有扫描单元。开始和结束时间都取调用方给出的时刻。
+// Reassessment does not dial, so it has no scan units. Both the start and finish times are the caller's timestamp.
+func (e *Engine) CompleteWithoutUnits(runID id.ID, now time.Time) error {
+	run, ok := e.runs[runID]
+	if !ok {
+		return ErrNotFound
+	}
+	if run.Status != RunPlanning {
+		return ErrConflict
+	}
+	if len(e.order[runID]) != 0 {
+		return fmt.Errorf("complete run %s: units already exist", runID)
+	}
+	stamp := now.UTC()
+	run.Status = RunCompleted
+	run.StartedAt = &stamp
+	run.FinishedAt = &stamp
+	return nil
+}
+
 // AddUnit 向同一次运行追加单元，并拒绝重复阶段键和依赖环。
 // AddUnit appends a unit to the same run and rejects a duplicate stage key or a dependency cycle.
 func (e *Engine) AddUnit(unit Unit) error {
