@@ -122,15 +122,86 @@ func TestDispositionRejectsBlankReasonAndUnknownFinding(t *testing.T) {
 	if _, err := svc.AddDisposition(findingID, actor, DispositionInput{Type: DispositionException, Reason: "window"}); err != nil {
 		t.Fatal(err)
 	}
-	if svc.Findings()[0].Status != "accepted" {
-		t.Fatalf("exception status = %s", svc.Findings()[0].Status)
+	if findings := svc.Findings(); findings[0].Status != "accepted" || findings[0].ActiveDispositionType != DispositionException {
+		t.Fatalf("exception status = %+v", findings[0])
 	}
 	if _, err := svc.AddDisposition(findingID, actor, DispositionInput{Type: DispositionFalsePositive, Reason: "banner mismatch"}); err != nil {
 		t.Fatal(err)
 	}
-	if svc.Findings()[0].Status != "suppressed" {
-		t.Fatalf("false positive status = %s", svc.Findings()[0].Status)
+	if findings := svc.Findings(); findings[0].Status != "suppressed" || findings[0].ActiveDispositionType != DispositionFalsePositive {
+		t.Fatalf("false positive status = %+v", findings[0])
 	}
+}
+
+func TestDispositionKeepsTheTypeAndConfirmsUndisposedFindings(t *testing.T) {
+	current := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	svc, err := New(t.TempDir(), func() time.Time { return current })
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := id.MustNew()
+	findingID, endpointID, evidenceID, _ := seedOpenFinding(svc, current)
+	findings := svc.Findings()
+	if findings[0].Status != "confirmed" || !findings[0].ActiveDispositionID.IsZero() || findings[0].ActiveDispositionType != "" {
+		t.Fatalf("undisposed = %+v", findings[0])
+	}
+	bareID := id.MustNew()
+	svc.findings["bare"] = &Finding{ID: bareID, FindingKey: "bare", VulnerabilityID: "CVE-2026-0002", Status: "open", FirstSeenAt: current, LastSeenAt: current}
+	if status := findingStatus(svc, bareID); status != "open" {
+		t.Fatalf("occurrence-free status = %s", status)
+	}
+	if _, err := svc.AddDisposition(findingID, actor, DispositionInput{Type: DispositionReopen, Reason: "not closed"}); !errors.Is(err, ErrDispositionState) || len(svc.Dispositions(findingID)) != 0 {
+		t.Fatalf("reopen stored: %v", err)
+	}
+	if _, err := svc.AddDisposition(findingID, actor, DispositionInput{Type: DispositionAcceptRisk, Reason: "owned", Scope: json.RawMessage(`[]`)}); err == nil {
+		t.Fatal("array scope was accepted")
+	}
+	later := current.Add(time.Hour)
+	if _, err := svc.AddDisposition(findingID, actor, DispositionInput{Type: DispositionAcceptRisk, Reason: "owned", ValidFrom: &later}); err != nil {
+		t.Fatal(err)
+	}
+	got := findingByID(svc, findingID)
+	if got.Status != "confirmed" || got.ActiveDispositionType != "" {
+		t.Fatalf("future disposition changed status: %+v", got)
+	}
+	current = later
+	got = findingByID(svc, findingID)
+	if got.Status != "accepted" || got.ActiveDispositionType != DispositionAcceptRisk {
+		t.Fatalf("accepted = %+v", got)
+	}
+	until := current.Add(time.Minute)
+	if _, err := svc.AddDisposition(findingID, actor, DispositionInput{Type: DispositionSuppress, Reason: "window", ValidUntil: &until}); err != nil {
+		t.Fatal(err)
+	}
+	svc.mergeFinding(endpointID, id.ID{}, "CVE-2026-0001", id.MustNew(), id.MustNew(), "1.24.0", "vulnerability", "high", []id.ID{evidenceID}, id.ID{}, id.ID{})
+	got = findingByID(svc, findingID)
+	if got.Status != "suppressed" || got.ActiveDispositionType != DispositionSuppress {
+		t.Fatalf("suppress = %+v", got)
+	}
+	current = until
+	got = findingByID(svc, findingID)
+	if got.Status != "accepted" || got.ActiveDispositionType != DispositionAcceptRisk {
+		t.Fatalf("fallback = %+v", got)
+	}
+	if _, err := svc.AddDisposition(findingID, actor, DispositionInput{Type: DispositionReopen, Reason: "review"}); err != nil {
+		t.Fatal(err)
+	}
+	got = findingByID(svc, findingID)
+	if got.Status != "reopened" || got.ActiveDispositionType != DispositionReopen || got.ResolvedAt != nil {
+		t.Fatalf("reopened = %+v", got)
+	}
+	if len(svc.detections) == 0 || svc.detections[0].ResultStatus != "confirmed" {
+		t.Fatal("disposition rewrote a detection")
+	}
+}
+
+func findingByID(svc *Service, findingID id.ID) Finding {
+	for _, item := range svc.Findings() {
+		if item.ID == findingID {
+			return item
+		}
+	}
+	return Finding{}
 }
 
 func seedOpenFinding(svc *Service, when time.Time) (id.ID, id.ID, id.ID, id.ID) {

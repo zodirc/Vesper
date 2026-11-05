@@ -116,7 +116,7 @@ func TestScanLoopIdentifiesHTTPAndMergesFinding(t *testing.T) {
 		t.Fatalf("hypotheses = %+v", svc.Hypotheses())
 	}
 	findings := svc.Findings()
-	if len(findings) != 1 || findings[0].VulnerabilityID != "CVE-2026-0001" || findings[0].Status != "open" || findings[0].Severity != "high" {
+	if len(findings) != 1 || findings[0].VulnerabilityID != "CVE-2026-0001" || findings[0].Status != "confirmed" || findings[0].Severity != "high" {
 		t.Fatalf("findings = %+v", findings)
 	}
 	if len(svc.occurrences) != 1 || len(svc.occurrences[0].EvidenceIDs) == 0 || findings[0].LastOccurrenceID != svc.occurrences[0].ID || findings[0].ProductID.IsZero() {
@@ -795,7 +795,7 @@ func TestDNSProbeRecordsProtocolWithoutInventingProduct(t *testing.T) {
 	}
 	var sawService bool
 	for _, item := range svc.Hypotheses() {
-		if item.ServiceType == "dns" && item.RawProductName == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-14" {
+		if item.ServiceType == "dns" && item.RawProductName == "" && item.IdentityStatus == "unknown" && item.FingerprintPackVersion == "builtin-15" {
 			sawService = true
 		}
 	}

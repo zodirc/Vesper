@@ -77,7 +77,7 @@ func TestVerificationRetestsTheEndpointAndDoesNotCloseWithoutContraryEvidence(t 
 	}
 	finishRun(t, svc)
 	findings := svc.Findings()
-	if len(findings) != 1 || findings[0].Status != "open" {
+	if len(findings) != 1 || findings[0].Status != "confirmed" {
 		t.Fatalf("findings = %+v", findings)
 	}
 	if _, err := svc.CreateVerification(context.Background(), id.MustNew(), grant.ID); !errors.Is(err, ErrFindingNotFound) {
@@ -186,7 +186,7 @@ func TestVerificationNoResponseDoesNotResolve(t *testing.T) {
 	if _, err := svc.AddDisposition(findingID, actor, DispositionInput{Type: DispositionResolve, Reason: "gone", DetectionID: id.MustNew()}); !errors.Is(err, ErrDispositionVerification) {
 		t.Fatalf("err = %v", err)
 	}
-	if status := findingStatus(svc, findingID); status != "open" || occurrenceCount(svc, findingID) != 1 {
+	if status := findingStatus(svc, findingID); status != "confirmed" || occurrenceCount(svc, findingID) != 1 {
 		t.Fatalf("status = %s occurrences = %d", status, occurrenceCount(svc, findingID))
 	}
 }
@@ -298,7 +298,7 @@ func TestConfigurationVerificationCollectsOnlyTheOriginalOperation(t *testing.T)
 			t.Fatalf("configuration retest closed the finding: %v", err)
 		}
 	}
-	if status := findingStatus(svc, findingID); status != "open" || occurrenceCount(svc, findingID) != 1 {
+	if status := findingStatus(svc, findingID); status != "confirmed" || occurrenceCount(svc, findingID) != 1 {
 		t.Fatalf("status = %s occurrences = %d", status, occurrenceCount(svc, findingID))
 	}
 }
