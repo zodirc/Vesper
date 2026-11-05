@@ -59,22 +59,30 @@ func Run(ctx context.Context, spec Spec, exchange func(context.Context, []byte) 
 // Execute 按已注册的探针名称运行。没有注册探针时不发送报文，结论是 unknown。
 // Execute runs a registered probe by name. When no probe is registered it sends nothing and the conclusion is unknown.
 //
-// 当前注册的探针只有 DNS。qname 只供 DNS 选择查询名称。
-// The only registered probe is DNS. qname is used only by DNS to choose the query name.
+// 当前注册的探针是 DNS 和 NTP。qname 只供 DNS 选择查询名称。
+// The registered probes are DNS and NTP. qname is used only by DNS to choose the query name.
 func Execute(ctx context.Context, name string, exchange func(context.Context, []byte) ([]byte, error), qname string) (Result, error) {
-	if name != DNSName {
+	switch name {
+	case DNSName:
+		return ProbeDNS(ctx, exchange, qname)
+	case NTPName:
+		return ProbeNTP(ctx, exchange)
+	default:
 		return Result{Outcome: Outcome{State: "unknown", Status: "not_scanned", Message: "udp probe has no protocol request"}}, nil
 	}
-	return ProbeDNS(ctx, exchange, qname)
 }
 
 // ResponseLimit 返回已注册探针的响应读取上限。没有注册探针时返回 0。
 // ResponseLimit returns the response read limit of a registered probe. It returns 0 when no probe is registered.
 func ResponseLimit(name string) int {
-	if name == DNSName {
+	switch name {
+	case DNSName:
 		return DNSMaxResponseBytes
+	case NTPName:
+		return NTPPacketBytes
+	default:
+		return 0
 	}
-	return 0
 }
 
 func exchangeOutcome(spec Spec, err error) (Outcome, bool, bool) {

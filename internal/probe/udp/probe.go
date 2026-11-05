@@ -1,5 +1,5 @@
-// Package udp 执行有请求和响应规则的 UDP 探针。当前只发送 DNS 查询。
-// Package udp runs UDP probes that have a request and a response rule. It currently sends only DNS queries.
+// Package udp 执行有请求和响应规则的 UDP 探针。当前发送 DNS 查询和 NTP 客户端报文。
+// Package udp runs UDP probes that have a request and a response rule. It currently sends DNS queries and NTP client packets.
 //
 // 没有探针的端口保持 unknown，不发送报文。超时不能写成 closed。
 // A port without a probe stays unknown and is not sent a packet. A timeout cannot be recorded as closed.

@@ -46,13 +46,17 @@ type Result struct {
 	QType    uint16
 }
 
-// ProbeForPort 按端口提示选择探针。只有 53 选择 DNS，其他端口没有探针。
-// ProbeForPort selects a probe from the port hint. Only port 53 selects DNS. Every other port has no probe.
+// ProbeForPort 按端口提示选择探针。53 选择 DNS，123 选择 NTP，其他端口没有探针。
+// ProbeForPort selects a probe from the port hint. Port 53 selects DNS, port 123 selects NTP, and every other port has no probe.
 func ProbeForPort(port int) string {
-	if port == DNSPort {
+	switch port {
+	case DNSPort:
 		return DNSName
+	case NTPPort:
+		return NTPName
+	default:
+		return ""
 	}
-	return ""
 }
 
 // Query 构造一条标准 DNS 查询。name 为空或为 "." 时查询根。qtype 为记录类型。

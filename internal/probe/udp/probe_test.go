@@ -88,7 +88,7 @@ func TestRunRetriesOnlyTimeoutAndStopsOnICMP(t *testing.T) {
 
 func TestUnregisteredProbeDoesNotSend(t *testing.T) {
 	called := false
-	result, err := Execute(context.Background(), "ntp", func(context.Context, []byte) ([]byte, error) {
+	result, err := Execute(context.Background(), "snmp", func(context.Context, []byte) ([]byte, error) {
 		called = true
 		return []byte{1}, nil
 	}, "")
