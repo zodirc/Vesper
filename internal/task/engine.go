@@ -69,8 +69,8 @@ type Run struct {
 	TargetIDs    []id.ID
 	ScopeGrantID id.ID
 	ScopeDigest  string
-	// TriggerType 是运行触发方式：manual、scheduled、reassessment、verification。
-	// TriggerType is how the run was triggered: manual, scheduled, reassessment, or verification.
+	// TriggerType 是运行触发方式：manual、scheduled、reassessment、verification、supplemental。
+	// TriggerType is how the run was triggered: manual, scheduled, reassessment, verification, or supplemental.
 	TriggerType string
 	// EffectiveBudget 是创建时冻结的预算上限，不随执行消耗变化。
 	// EffectiveBudget is the budget ceiling frozen at creation and does not change with consumption.

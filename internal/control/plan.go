@@ -36,6 +36,15 @@ type planBody struct {
 	// ReassessmentAdded 是这次再评估新增的检测结果数量。只有再评估运行写入。
 	// ReassessmentAdded is the number of detection results this reassessment added. Only a reassessment run writes it.
 	ReassessmentAdded *int `json:"reassessment_added,omitempty"`
+	// SupplementalScans 是同一次再评估创建的补充采集数量。
+	// SupplementalScans is the number of supplemental collection runs created by the same reassessment.
+	SupplementalScans *int `json:"supplemental_scans,omitempty"`
+	// SupplementalUncovered 是证据过期或缺失但没有生成采集的目标数量。
+	// SupplementalUncovered is the number of targets with expired or missing evidence for which no collection was created.
+	SupplementalUncovered *int `json:"supplemental_uncovered,omitempty"`
+	// SupplementalSubject 是补充采集运行对应的端点或主机。
+	// SupplementalSubject is the endpoint or host covered by a supplemental collection run.
+	SupplementalSubject string `json:"supplemental_subject,omitempty"`
 }
 
 type preparedScan struct {

@@ -58,18 +58,23 @@ func (s *Service) ImportIntel(ctx context.Context, source string, document []byt
 	return published, err
 }
 
-// Reassess 用指定情报快照对已有服务候选和已采集的发行版软件包重新做适用性判断。
-// Reassess judges applicability of existing service candidates and collected distribution packages again with one selected intelligence snapshot.
+// Reassess 用指定情报快照对已有服务候选和已采集的发行版软件包重新做适用性判断，并为证据过期或缺失的目标创建补充采集。
+// Reassess judges applicability of existing service candidates and collected distribution packages again with one selected intelligence snapshot, and creates supplemental collection for targets whose evidence is expired or missing.
 //
-// 已有观察、已有候选和已有检测结果保持不变。当前已发布的指纹规则会追加新的服务候选，当前已发布的配置规则会用每个资产最新的主机观察再判断一次。同一快照、同一主体、同一规则和同一输入已经有相同结论时不再追加。新的确认会更新 Finding 的当前严重性。证据过期后的补充采集没有设计给出的时限，这里不创建新的扫描，也不写入 resolve。
-// Existing observations, candidates, and detection results stay unchanged. The currently published fingerprint rules append new service candidates, and the currently published configuration rules judge each asset's latest host observations again. An identical conclusion for the same snapshot, subject, rule, and inputs is not appended. A new confirmation updates the Finding's current severity. Supplemental collection after evidence expiry has no designed time limit, so this does not create a scan and does not write resolve.
-func (s *Service) Reassess(ctx context.Context, snapshotID id.ID) (int, error) {
+// 已有观察、已有候选和已有检测结果保持不变。当前已发布的指纹规则会追加新的服务候选，当前已发布的配置规则会用每个资产最新的主机观察再判断一次。同一快照、同一主体、同一规则和同一输入已经有相同结论时不再追加。新的确认会更新 Finding 的当前严重性。补充采集是单独的运行，不改写这次再评估已经做出的判断，也不写入 resolve。
+// Existing observations, candidates, and detection results stay unchanged. The currently published fingerprint rules append new service candidates, and the currently published configuration rules judge each asset's latest host observations again. An identical conclusion for the same snapshot, subject, rule, and inputs is not appended. A new confirmation updates the Finding's current severity. Supplemental collection is a separate run. It does not rewrite the judgments this reassessment already made and does not write resolve.
+//
+// options.MaxAge 超出 1 秒到 315360000 秒时返回错误。0 表示按已启用的再评估周期决定时限。
+// It returns an error when options.MaxAge is outside 1 second through 315360000 seconds. Zero selects the age from enabled reassessment schedules.
+func (s *Service) Reassess(ctx context.Context, snapshotID id.ID, options ReassessOptions) (ReassessResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if options.MaxAge < 0 || options.MaxAge > time.Duration(maxScheduleIntervalSeconds)*time.Second {
+		return ReassessResult{}, fmt.Errorf("reassess: evidence max age %s", options.MaxAge)
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	var added int
+	var result ReassessResult
 	err := s.commitState(ctx, func() error {
 		if _, ok := s.snapshotByID(snapshotID); !ok {
 			return fmt.Errorf("reassess: intel snapshot %s not found", snapshotID)
@@ -89,10 +94,23 @@ func (s *Service) Reassess(ctx context.Context, snapshotID id.ID) (int, error) {
 		if err := s.judgeDistroPackages(snapshotID, id.ID{}); err != nil {
 			return err
 		}
-		added = len(s.detections) - before
+		result.Detections = len(s.detections) - before
 		return nil
 	})
-	return added, err
+	if err != nil {
+		s.mu.Unlock()
+		return ReassessResult{}, err
+	}
+	maxAge := options.MaxAge
+	if maxAge == 0 {
+		maxAge = s.evidenceMaxAge()
+	}
+	requests, uncovered := s.supplementalTargets(s.now().UTC(), maxAge, options.GrantID)
+	s.mu.Unlock()
+	created, skipped, err := s.createSupplemental(ctx, requests)
+	result.Supplemental = created
+	result.Uncovered = uncovered + skipped
+	return result, err
 }
 
 // Snapshots 返回已发布情报快照的副本。

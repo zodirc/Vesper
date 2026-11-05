@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -803,12 +804,42 @@ func (s *Server) reassessIntel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_id", err.Error())
 		return
 	}
-	added, err := s.Service.Reassess(r.Context(), snapshotID)
+	maxAge, err := evidenceMaxAge(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_evidence_age", err.Error())
+		return
+	}
+	result, err := s.Service.Reassess(r.Context(), snapshotID, control.ReassessOptions{MaxAge: maxAge})
 	if err != nil {
 		writeError(w, http.StatusNotFound, "reassess_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"snapshot_id": snapshotID.String(), "detections": added})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"snapshot_id": snapshotID.String(), "detections": result.Detections,
+		"supplemental_scans": result.Supplemental, "supplemental_uncovered": result.Uncovered,
+	})
+}
+
+func evidenceMaxAge(r *http.Request) (time.Duration, error) {
+	if r.Body == nil || r.ContentLength == 0 {
+		return 0, nil
+	}
+	var body struct {
+		EvidenceMaxAgeSeconds *int64 `json:"evidence_max_age_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if errors.Is(err, io.EOF) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if body.EvidenceMaxAgeSeconds == nil || *body.EvidenceMaxAgeSeconds == 0 {
+		return 0, nil
+	}
+	if *body.EvidenceMaxAgeSeconds < 1 || *body.EvidenceMaxAgeSeconds > 315360000 {
+		return 0, errors.New("evidence_max_age_seconds must be from 1 to 315360000")
+	}
+	return time.Duration(*body.EvidenceMaxAgeSeconds) * time.Second, nil
 }
 
 func intelDocument(raw json.RawMessage) ([]byte, error) {

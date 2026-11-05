@@ -48,19 +48,19 @@ func TestNVDImportConfirmsTheListedVersionOnly(t *testing.T) {
 	svc.hypotheses = append(svc.hypotheses, identity.Hypothesis{
 		ID: id.MustNew(), EndpointID: endpoint, ProductIdentityID: &productID, RawVersion: "1.24.0", EvaluatedAt: now,
 	})
-	added, err := svc.Reassess(context.Background(), snapshot.ID)
+	added, err := svc.Reassess(context.Background(), snapshot.ID, ReassessOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 1 || svc.detections[0].ResultStatus != "confirmed" || svc.detections[0].VulnerabilityID != "CVE-2026-3000" {
-		t.Fatalf("added = %d detections = %+v", added, svc.detections)
+	if added.Detections != 1 || svc.detections[0].ResultStatus != "confirmed" || svc.detections[0].VulnerabilityID != "CVE-2026-3000" {
+		t.Fatalf("added = %d detections = %+v", added.Detections, svc.detections)
 	}
 	svc.hypotheses[0].RawVersion = "1.26.0"
-	added, err = svc.Reassess(context.Background(), snapshot.ID)
+	added, err = svc.Reassess(context.Background(), snapshot.ID, ReassessOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 1 || svc.detections[len(svc.detections)-1].ResultStatus == "confirmed" {
+	if added.Detections != 1 || svc.detections[len(svc.detections)-1].ResultStatus == "confirmed" {
 		t.Fatalf("fixed version was confirmed: %+v", svc.detections[len(svc.detections)-1])
 	}
 	rejected, err := svc.ImportIntel(context.Background(), "nvd", []byte(`{"vulnerabilities":[{"cve":{"id":"CVE-2026-3000","vulnStatus":"Rejected"}}]}`))
@@ -68,7 +68,7 @@ func TestNVDImportConfirmsTheListedVersionOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc.hypotheses[0].RawVersion = "1.24.0"
-	if _, err := svc.Reassess(context.Background(), rejected.ID); err != nil {
+	if _, err := svc.Reassess(context.Background(), rejected.ID, ReassessOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, detection := range svc.detections {

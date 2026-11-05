@@ -41,7 +41,7 @@ func TestContradictoryAndConflictedIdentityDoNotConfirm(t *testing.T) {
 		identity.Hypothesis{ID: id.MustNew(), EndpointID: endpoint, ProductIdentityID: &productID, RawVersion: "1.2.0", IdentityStatus: "candidate", EvaluatedAt: now},
 		identity.Hypothesis{ID: id.MustNew(), EndpointID: id.MustNew(), ProductIdentityID: &productID, RawVersion: "1.5.0", IdentityStatus: "conflict", EvaluatedAt: now},
 	)
-	if _, err := svc.Reassess(context.Background(), snapshot.ID); err != nil {
+	if _, err := svc.Reassess(context.Background(), snapshot.ID, ReassessOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, detection := range svc.detections {
@@ -84,12 +84,12 @@ func TestRPMPackageUsesEpochVersionRelease(t *testing.T) {
 		}},
 	})
 	svc.mu.Unlock()
-	added, err := svc.Reassess(context.Background(), snapshot.ID)
+	added, err := svc.Reassess(context.Background(), snapshot.ID, ReassessOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 1 || svc.detections[0].ResultStatus != "confirmed" || svc.detections[0].SubjectType != "software_package" {
-		t.Fatalf("added = %d detections = %+v", added, svc.detections)
+	if added.Detections != 1 || svc.detections[0].ResultStatus != "confirmed" || svc.detections[0].SubjectType != "software_package" {
+		t.Fatalf("added = %d detections = %+v", added.Detections, svc.detections)
 	}
 	svc.mu.Lock()
 	svc.appendObservation(Observation{
@@ -100,7 +100,7 @@ func TestRPMPackageUsesEpochVersionRelease(t *testing.T) {
 		}},
 	})
 	svc.mu.Unlock()
-	if _, err := svc.Reassess(context.Background(), snapshot.ID); err != nil {
+	if _, err := svc.Reassess(context.Background(), snapshot.ID, ReassessOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	last := svc.detections[len(svc.detections)-1]

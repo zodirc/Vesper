@@ -357,14 +357,16 @@ func (s *Service) fireReassessment(ctx context.Context, item Schedule) (id.ID, e
 	if snapshot.IsZero() {
 		return id.ID{}, errIntelSnapshotMissing
 	}
-	added, err := s.Reassess(ctx, snapshot)
+	result, err := s.Reassess(ctx, snapshot, ReassessOptions{
+		MaxAge: time.Duration(item.IntervalSeconds) * time.Second, GrantID: item.GrantID,
+	})
 	if err != nil {
 		return id.ID{}, err
 	}
-	return s.recordReassessmentRun(ctx, item, snapshot, added)
+	return s.recordReassessmentRun(ctx, item, snapshot, result)
 }
 
-func (s *Service) recordReassessmentRun(ctx context.Context, item Schedule, snapshot id.ID, added int) (id.ID, error) {
+func (s *Service) recordReassessmentRun(ctx context.Context, item Schedule, snapshot id.ID, result ReassessResult) (id.ID, error) {
 	runID, err := id.New()
 	if err != nil {
 		return id.ID{}, err
@@ -380,8 +382,13 @@ func (s *Service) recordReassessmentRun(ctx context.Context, item Schedule, snap
 		if err != nil {
 			return err
 		}
-		count := added
-		body, err := json.Marshal(planBody{ScheduleID: item.ID.String(), ReassessmentAdded: &count})
+		count := result.Detections
+		scans := result.Supplemental
+		uncovered := result.Uncovered
+		body, err := json.Marshal(planBody{
+			ScheduleID: item.ID.String(), ReassessmentAdded: &count,
+			SupplementalScans: &scans, SupplementalUncovered: &uncovered,
+		})
 		if err != nil {
 			return err
 		}

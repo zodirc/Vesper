@@ -200,12 +200,12 @@ func TestScanLoopIdentifiesHTTPAndMergesFinding(t *testing.T) {
 	}
 	beforeObservations := svc.Observations(run.ID)
 	beforeDetections := append([]Detection(nil), svc.detections...)
-	added, err := svc.Reassess(context.Background(), got.IntelSnapshotID)
+	added, err := svc.Reassess(context.Background(), got.IntelSnapshotID, ReassessOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added < 1 {
-		t.Fatalf("reassess added %d detections", added)
+	if added.Detections < 1 {
+		t.Fatalf("reassess added %d detections", added.Detections)
 	}
 	afterObservations := svc.Observations(run.ID)
 	if len(afterObservations) != len(beforeObservations) {

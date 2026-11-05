@@ -35,12 +35,12 @@ func TestDistroAdvisoryConfirmsBackportAndLeavesFixedPackage(t *testing.T) {
 		}},
 	})
 	svc.mu.Unlock()
-	added, err := svc.Reassess(context.Background(), snapshot.ID)
+	added, err := svc.Reassess(context.Background(), snapshot.ID, ReassessOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 2 {
-		t.Fatalf("added %d detections", added)
+	if added.Detections != 2 {
+		t.Fatalf("added %d detections", added.Detections)
 	}
 	var affected, fixed bool
 	for _, item := range svc.detections {

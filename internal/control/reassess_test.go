@@ -36,12 +36,12 @@ func TestReassessAppendsNewJudgmentsAndKeepsHistory(t *testing.T) {
 	svc.mu.Unlock()
 	snapshots := svc.Snapshots()
 	first := snapshots[len(snapshots)-1]
-	added, err := svc.Reassess(context.Background(), first.ID)
+	added, err := svc.Reassess(context.Background(), first.ID, ReassessOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 1 || len(svc.hypotheses) != 1 || svc.hypotheses[0].RawProductName != "nginx" || svc.hypotheses[0].RawVersion != "1.24.0" {
-		t.Fatalf("added = %d hypotheses = %+v", added, svc.hypotheses)
+	if added.Detections != 1 || len(svc.hypotheses) != 1 || svc.hypotheses[0].RawProductName != "nginx" || svc.hypotheses[0].RawVersion != "1.24.0" {
+		t.Fatalf("added = %d hypotheses = %+v", added.Detections, svc.hypotheses)
 	}
 	originalHypothesis := svc.hypotheses[0]
 	originalDetection := svc.detections[0]
@@ -52,12 +52,12 @@ func TestReassessAppendsNewJudgmentsAndKeepsHistory(t *testing.T) {
 	if len(findings) != 1 || findings[0].Severity != "high" || findings[0].Status != "confirmed" {
 		t.Fatalf("findings = %+v", findings)
 	}
-	added, err = svc.Reassess(context.Background(), first.ID)
+	added, err = svc.Reassess(context.Background(), first.ID, ReassessOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 0 || len(svc.detections) != 1 || len(svc.occurrences) != 1 || svc.hypotheses[0].ID != originalHypothesis.ID || svc.hypotheses[0].RawVersion != originalHypothesis.RawVersion {
-		t.Fatalf("repeat added = %d detections = %d occurrences = %d", added, len(svc.detections), len(svc.occurrences))
+	if added.Detections != 0 || len(svc.detections) != 1 || len(svc.occurrences) != 1 || svc.hypotheses[0].ID != originalHypothesis.ID || svc.hypotheses[0].RawVersion != originalHypothesis.RawVersion {
+		t.Fatalf("repeat added = %d detections = %d occurrences = %d", added.Detections, len(svc.detections), len(svc.occurrences))
 	}
 	statement.Severity = "critical"
 	if err := svc.AddStatement(statement); err != nil {
@@ -65,12 +65,12 @@ func TestReassessAppendsNewJudgmentsAndKeepsHistory(t *testing.T) {
 	}
 	snapshots = svc.Snapshots()
 	second := snapshots[len(snapshots)-1]
-	added, err = svc.Reassess(context.Background(), second.ID)
+	added, err = svc.Reassess(context.Background(), second.ID, ReassessOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 1 {
-		t.Fatalf("severity change added %d", added)
+	if added.Detections != 1 {
+		t.Fatalf("severity change added %d", added.Detections)
 	}
 	var kept bool
 	for _, item := range svc.detections {
@@ -89,7 +89,7 @@ func TestReassessAppendsNewJudgmentsAndKeepsHistory(t *testing.T) {
 	}
 	snapshots = svc.Snapshots()
 	third := snapshots[len(snapshots)-1]
-	if _, err := svc.Reassess(context.Background(), third.ID); err != nil {
+	if _, err := svc.Reassess(context.Background(), third.ID, ReassessOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	var cleared bool
