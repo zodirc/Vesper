@@ -14,10 +14,37 @@ import (
 )
 
 func savePacks(ctx context.Context, tx pgx.Tx, s *Service) error {
+	return writePacks(ctx, tx, s, false)
+}
+
+// adoptBuiltinPacks 把当前构建里数据库尚未保存的内置包附加到已装入的包列表。已有版本保持原正文和摘要。
+// adoptBuiltinPacks appends built-in packs from this build that are not yet stored. An existing version keeps its body and digest.
+func adoptBuiltinPacks(stored, builtin []rule.Pack) []rule.Pack {
+	present := map[string]struct{}{}
+	for _, pack := range stored {
+		present[pack.Type+"\n"+pack.Version] = struct{}{}
+	}
+	out := append([]rule.Pack(nil), stored...)
+	for _, pack := range builtin {
+		if pack.Source != "builtin" {
+			continue
+		}
+		if _, ok := present[pack.Type+"\n"+pack.Version]; ok {
+			continue
+		}
+		out = append(out, pack)
+	}
+	return out
+}
+
+func writePacks(ctx context.Context, tx pgx.Tx, s *Service, insertOnly bool) error {
 	for _, pack := range s.packs {
 		var digest string
 		err := tx.QueryRow(ctx, `SELECT content_digest FROM rule_pack WHERE pack_type = $1 AND version = $2`, pack.Type, pack.Version).Scan(&digest)
 		if err == nil {
+			if insertOnly {
+				continue
+			}
 			if err := rule.CheckUpdate(rule.Pack{ID: pack.ID, Type: pack.Type, Version: pack.Version, Status: "published", ContentDigest: digest}, pack); err != nil {
 				return err
 			}
@@ -89,6 +116,9 @@ INSERT INTO config_rule (
 				return fmt.Errorf("save config rule %s: %w", item.Key, err)
 			}
 		}
+	}
+	if insertOnly {
+		return nil
 	}
 	return saveActiveTemplates(ctx, tx, s)
 }

@@ -50,6 +50,12 @@ func saveAll(ctx context.Context, tx pgx.Tx, s *Service) error {
 	if err := saveAssessment(ctx, tx, s); err != nil {
 		return err
 	}
+	if err := saveSchedules(ctx, tx, s); err != nil {
+		return err
+	}
+	if err := saveFeeds(ctx, tx, s); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -415,9 +421,9 @@ func saveProducts(ctx context.Context, tx pgx.Tx, s *Service) error {
 	now := s.now().UTC()
 	for _, product := range s.products {
 		_, err := tx.Exec(ctx, `
-INSERT INTO product_identity (id, ecosystem, product_name, canonical_key, created_at, updated_at)
-VALUES ($1::uuid, $2, $3, $4, $5, $5)
-ON CONFLICT (id) DO NOTHING`, product.ID.String(), product.Ecosystem, product.ProductName, product.CanonicalKey, now)
+INSERT INTO product_identity (id, ecosystem, product_name, canonical_key, vendor, product_family, cpe23, purl, created_at, updated_at)
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+ON CONFLICT (id) DO NOTHING`, product.ID.String(), product.Ecosystem, product.ProductName, product.CanonicalKey, textArg(product.Vendor), textArg(product.ProductFamily), textArg(product.CPE23), textArg(product.PURL), now)
 		if err != nil {
 			return fmt.Errorf("save product %s: %w", product.ID, err)
 		}
@@ -564,6 +570,9 @@ func saveAssessment(ctx context.Context, tx pgx.Tx, s *Service) error {
 			assetID := id.ID{}
 			if item.SubjectType == "asset" {
 				kind = "config"
+				assetID = item.SubjectID
+			}
+			if item.SubjectType == "software_package" {
 				assetID = item.SubjectID
 			}
 			row = &draft{kind: kind, asset: assetID, endpoint: item.EndpointID, intel: item.IntelSnapshotID, evaluatedAt: item.EvaluatedAt.UTC(), seen: map[id.ID]struct{}{}}

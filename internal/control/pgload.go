@@ -114,12 +114,27 @@ func (d *pgStore) load(ctx context.Context, s *Service) error {
 			return err
 		}
 		loadedPacks = s.packs
+	} else {
+		merged := adoptBuiltinPacks(loadedPacks, s.packs)
+		s.packs = merged
+		if err := writePacks(ctx, tx, s, true); err != nil {
+			return err
+		}
+		loadedPacks = merged
 	}
 	var location *string
 	if err := tx.QueryRow(ctx, `SELECT location_label FROM observation_point WHERE name = 'local'`).Scan(&location); err != nil {
 		return fmt.Errorf("load observation point label: %w", err)
 	}
 	active, err := loadActiveTemplates(ctx, tx)
+	if err != nil {
+		return err
+	}
+	schedules, err := loadSchedules(ctx, tx)
+	if err != nil {
+		return err
+	}
+	feeds, err := loadFeeds(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -134,7 +149,9 @@ func (d *pgStore) load(ctx context.Context, s *Service) error {
 	if s.worker.Capabilities == nil {
 		s.worker.Capabilities = map[string]struct{}{}
 	}
-	s.worker.Capabilities["active_detection"] = struct{}{}
+	for name := range localCapabilities() {
+		s.worker.Capabilities[name] = struct{}{}
+	}
 	s.grants = grants
 	s.revisions = revisions
 	s.catalog.Reset(targets, endpoints, assets)
@@ -153,6 +170,11 @@ func (d *pgStore) load(ctx context.Context, s *Service) error {
 	s.dispositions = dispositions
 	s.packs = loadedPacks
 	s.active = active
+	s.schedules = schedules
+	s.feeds = feeds
+	if s.firing == nil {
+		s.firing = map[id.ID]struct{}{}
+	}
 	s.frozen = map[id.ID]scope.Grant{}
 	s.accounts = map[id.ID]*scope.Account{}
 	s.baselines = map[id.ID]scope.Usage{}
@@ -192,6 +214,12 @@ func (d *pgStore) reloadTaskAuthority(ctx context.Context, tx pgx.Tx, s *Service
 	if _, err := tx.Exec(ctx, `SELECT id FROM scan_unit ORDER BY id FOR UPDATE`); err != nil {
 		return fmt.Errorf("lock scan units: %w", err)
 	}
+	if _, err := tx.Exec(ctx, `SELECT id FROM scan_schedule ORDER BY id FOR UPDATE`); err != nil {
+		return fmt.Errorf("lock scan schedules: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT source FROM intel_feed ORDER BY source FOR UPDATE`); err != nil {
+		return fmt.Errorf("lock intel feeds: %w", err)
+	}
 	grants, err := loadGrants(ctx, tx)
 	if err != nil {
 		return err
@@ -230,8 +258,18 @@ func (d *pgStore) reloadTaskAuthority(ctx context.Context, tx pgx.Tx, s *Service
 		}
 		accounts[run.ID] = account
 	}
+	schedules, err := loadSchedules(ctx, tx)
+	if err != nil {
+		return err
+	}
 	s.grants = grants
 	s.revisions = revisions
+	feeds, err := loadFeeds(ctx, tx)
+	if err != nil {
+		return err
+	}
+	s.schedules = schedules
+	s.feeds = feeds
 	s.tasks.Replace(runs, units, attempts)
 	s.frozen = frozen
 	s.accounts = accounts
@@ -796,7 +834,7 @@ FROM observation ORDER BY collected_at`)
 }
 
 func loadProducts(ctx context.Context, tx pgx.Tx) (map[id.ID]Product, []identity.Alias, error) {
-	rows, err := tx.Query(ctx, `SELECT id::text, ecosystem, product_name, canonical_key FROM product_identity`)
+	rows, err := tx.Query(ctx, `SELECT id::text, ecosystem, product_name, canonical_key, COALESCE(vendor, ''), COALESCE(product_family, ''), COALESCE(cpe23, ''), COALESCE(purl, '') FROM product_identity`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load products: %w", err)
 	}
@@ -805,7 +843,7 @@ func loadProducts(ctx context.Context, tx pgx.Tx) (map[id.ID]Product, []identity
 	for rows.Next() {
 		var item Product
 		var idText string
-		if err := rows.Scan(&idText, &item.Ecosystem, &item.ProductName, &item.CanonicalKey); err != nil {
+		if err := rows.Scan(&idText, &item.Ecosystem, &item.ProductName, &item.CanonicalKey, &item.Vendor, &item.ProductFamily, &item.CPE23, &item.PURL); err != nil {
 			return nil, nil, err
 		}
 		item.ID, err = id.Parse(idText)
